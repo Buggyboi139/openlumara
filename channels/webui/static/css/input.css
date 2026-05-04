@@ -27,25 +27,46 @@ body.token-bar-hidden .input-area {
     border-radius: var(--radius-md);
     color: var(--text-secondary);
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
     box-sizing: border-box;
+    position: relative;
+    overflow: hidden;
+}
+
+#upload::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at center, var(--accent) 0%, transparent 70%);
+    opacity: 0;
+    transition: opacity 0.3s ease;
 }
 
 #upload:hover {
     background: var(--bg-secondary);
     color: var(--accent);
     border-color: var(--accent);
-    transform: scale(1.05);
+    transform: scale(1.08);
+    box-shadow: 0 4px 12px rgba(var(--accent-rgb, 171, 171, 171), 0.3);
+}
+
+#upload:hover::before {
+    opacity: 0.1;
 }
 
 #upload svg {
     width: 20px;
     height: 20px;
     flex-shrink: 0;
+    transition: transform 0.2s ease;
+}
+
+#upload:hover svg {
+    transform: rotate(-5deg) scale(1.1);
 }
 
 #file-input {
@@ -64,7 +85,7 @@ body.token-bar-hidden .input-area {
     color: var(--text-primary);
     font-size: 1rem;
     outline: none;
-    transition: all 0.2s ease;
+    transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
     resize: none;
     max-height: 200px;
     font-family: inherit;
@@ -83,7 +104,24 @@ body.token-bar-hidden .input-area {
 
 #message:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent),
+                0 4px 12px rgba(var(--accent-rgb, 171, 171, 171), 0.2);
+    transform: translateY(-1px);
+}
+
+#message::placeholder {
+    color: var(--text-muted);
+    transition: opacity 0.2s ease;
+}
+
+#message:focus::placeholder {
+    opacity: 0.6;
+}
+
+#message:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
 }
 
 #message::placeholder {
@@ -103,7 +141,7 @@ body.token-bar-hidden .input-area {
     font-size: 0.95rem;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
@@ -111,6 +149,8 @@ body.token-bar-hidden .input-area {
     box-sizing: border-box;
     vertical-align: middle;
     color: var(--text-secondary);
+    position: relative;
+    overflow: hidden;
 }
 
 #send {
@@ -121,6 +161,21 @@ body.token-bar-hidden .input-area {
     background: var(--bg-secondary);
     color: var(--accent);
     border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(var(--accent-rgb, 171, 171, 171), 0.3);
+}
+
+#send::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(45deg, transparent 30%, rgba(255,255,255,0.1) 50%, transparent 70%);
+    transform: translateX(-100%);
+    transition: transform 0.6s ease;
+}
+
+#send:hover::after {
+    transform: translateX(100%);
 }
 
 #send.hidden { display: none; }
@@ -129,10 +184,17 @@ body.token-bar-hidden .input-area {
     background: var(--button-stop-hover);
     box-shadow: 0 0 15px var(--button-stop-glow);
     border-color: var(--accent);
+    transform: translateY(-2px);
 }
 
-#send:active { transform: scale(0.96); }
-#send:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+#send:active, #stop:active { 
+    transform: scale(0.96) translateY(0); 
+}
+#send:disabled { 
+    opacity: 0.5; 
+    cursor: not-allowed; 
+    transform: none; 
+}
 
 #stop {
     background: var(--error-bg);
@@ -146,8 +208,21 @@ body.token-bar-hidden .input-area {
     box-shadow: 0 0 15px rgba(248, 113, 113, 0.3);
 }
 
-#stop:active { transform: scale(0.96); }
-#stop.show { display: inline-flex; }
+#stop.show { 
+    display: inline-flex;
+    animation: buttonPopIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes buttonPopIn {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
 
 /* Token Usage Bar - Slim & Replaces Top Border */
 .token-usage-container {
@@ -177,7 +252,26 @@ body.token-bar-hidden .input-area {
     width: 0%;
     background: linear-gradient(90deg, #6366f1, #8b5cf6); /* Sleek gradient */
     border-radius: var(--radius-full);
-    transition: width 0.3s ease;
+    transition: width 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.token-usage-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+    transform: translateX(-100%);
+    animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
 }
 
 .token-usage-text {
@@ -185,6 +279,16 @@ body.token-bar-hidden .input-area {
     font-size: 0.65rem;
     color: var(--text-muted);
     font-weight: 500;
+    transition: color 0.2s ease;
+}
+
+/* Warning state for high token usage */
+.token-usage-container.warning .token-usage-bar-fill {
+    background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+
+.token-usage-container.warning .token-usage-text {
+    color: var(--error);
 }
 
 body.token-bar-hidden .input-area {
