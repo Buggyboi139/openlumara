@@ -7,6 +7,13 @@ marked.setOptions({
     gfm: true
 });
 
+// Escape HTML
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
 function renderMarkdown(text) {
     // parse markdown
     const rendered = marked.parse(text);

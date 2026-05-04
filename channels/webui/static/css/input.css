@@ -2,7 +2,7 @@
  *  Input Area - Modern Design with Improved Alignment
  *  ========================================================================== */
 .input-area {
-    padding: 20px;
+    padding: 10px;
     background: var(--bg-primary);
     display: flex;
     gap: 12px;
