@@ -129,7 +129,7 @@ class Scheduler(core.module.Module):
             return
 
         # Ensure context is available
-        if not hasattr(job_channel, 'context') or job_channel.context is None:
+        if job_channel is None or not hasattr(job_channel, 'context') or job_channel.context is None:
             core.log("scheduler", f"error executing job {job_id}: channel has no valid context")
             return
 

@@ -241,8 +241,10 @@ class Manager:
         return self.API.get_connection_status()
 
     async def get_system_prompt(self):
-        # Allow generating system prompt even when disconnected
-        # (modules may still need to provide context)
+        # only run on_system_prompt if the manager has a channel reference
+        if not self.channel:
+            return ""
+
         if self.pure_mode:
             return ""
 
@@ -292,6 +294,10 @@ class Manager:
             return ""
 
     async def get_end_prompt(self, prevent_recursion=False):
+        # only run if the manager has a channel reference
+        if not self.channel:
+            return None
+
         # don't return endprompt if characters module is active
         active_character = None
         if self.channel:
