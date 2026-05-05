@@ -36,34 +36,6 @@
     margin: 8px 0;
 }
 
-.file-preview-container {
-    margin: 6px 0;
-}
-
-.file-preview {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-}
-
-.file-icon {
-    font-size: 1.2em;
-    user-select: none;
-}
-
-.file-name {
-    font-size: 0.9em;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 250px;
-}
-
 /* Upload Queue - Modern Design */
 .upload-queue-container {
     padding: 10px 16px;

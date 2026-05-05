@@ -2252,8 +2252,10 @@ function createThemeSection() {
         localStorage.setItem('tokenBarVisible', isVisible);
 
         const tokenBar = document.getElementById('token-usage-container');
+        const tokenText = document.getElementById('token-usage-text');
         if (tokenBar) {
             tokenBar.style.display = isVisible ? 'flex' : 'none';
+            tokenText.style.display = isVisible ? 'block' : 'none';
         }
 
         // Add this line to toggle the class on the body
