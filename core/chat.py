@@ -373,8 +373,8 @@ class Chat:
         Used as a fallback if the API doesn't return usage data.
         """
         # if we have API token usage results (happens in core/channel.py),
-        # just return that
-        if self.token_usage > 0:
+        # just return that if we are not asking to count specific messages.
+        if self.token_usage > 0 and messages is None:
             return self.token_usage
 
         # otherwise fall back to counting with tiktoken
@@ -396,16 +396,24 @@ class Chat:
             # OpenAI message format overhead is ~4 tokens per message
             # <im_start>{role/name}\n{content}<im_end>\n
             num_tokens += 4
-            for key, value in message.items():
-                if value and isinstance(value, str):
-                    # if it's just a normal text message, count tokens using its contents
-                    num_tokens += len(encoding.encode(value))
-                elif value and isinstance(value, list):
+            
+            # We only want to count the content, not the role itself, 
+            # as the role is part of the overhead.
+            if "content" in message:
+                content = message["content"]
+                if isinstance(content, str):
+                    num_tokens += len(encoding.encode(content))
+                elif isinstance(content, list):
                     # if its multimodal, skip all non-text content because we filter that out when using context.get()
-                    for part in value:
-                        part_text = part.get("text", None)
-                        if isinstance(part, dict) and part_text:
-                            num_tokens += len(encoding.encode(part_text))
+                    for part in content:
+                        if isinstance(part, dict):
+                            part_text = part.get("text")
+                            if isinstance(part_text, str):
+                                num_tokens += len(encoding.encode(part_text))
+            
+            # If there's a name, it's also part of the content/overhead
+            if "name" in message and isinstance(message["name"], str):
+                num_tokens += len(encoding.encode(message["name"]))
 
         # Add 2-3 tokens for the assistant priming at the end
         num_tokens += 2

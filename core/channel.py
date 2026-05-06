@@ -61,13 +61,6 @@ class Channel:
         # fallback
         return ""
 
-    async def get_token_usage(self):
-        if not self.token_usage:
-            # fall back to manual counting
-            return self.context.get_token_usage()
-
-        return self.token_usage
-
     async def send(self, message: dict):
         """sends a message to the AI from within the current channel"""
 
@@ -266,6 +259,7 @@ class Channel:
                 token_usage = token.get("content")
                 if isinstance(token_usage, int):
                     self.context.chat.token_usage = token_usage
+                yield token
 
         if not tool_calls_occurred:
             assistant_message = {

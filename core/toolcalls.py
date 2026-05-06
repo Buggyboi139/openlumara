@@ -237,7 +237,7 @@ class ToolcallManager:
                 if token_type == "token_usage":
                     usage = token.get("content")
                     if usage is not None:
-                        total_tool_usage += usage
+                        total_tool_usage = usage
                         # Yield it to the frontend so the token bar updates in real-time
                         yield token
 
