@@ -291,26 +291,29 @@ class Channel:
             # yield an estimated token usage if the API didn't provide one
             yield {"type": "token_usage", "content": self.context.chat.count_tokens(), "source": "estimation"}
 
-        assistant_message = {
-            "role": "assistant",
-            "content": "".join(final_content)
-        }
+        if not tool_calls_occurred: # don't add an extra message at the end of a toolcalling chain
 
-        if final_reasoning:
-            assistant_message["reasoning_content"] = "".join(final_reasoning)
+            # add the assistant's response to context
+            assistant_message = {
+                "role": "assistant",
+                "content": "".join(final_content)
+            }
 
-        await self.context.chat.add(assistant_message)
+            if final_reasoning:
+                assistant_message["reasoning_content"] = "".join(final_reasoning)
 
-        # run module event hooks
-        for module_name, module in self.manager.modules.items():
-            if hasattr(module, "on_assistant_message"):
-                try:
-                    if asyncio.iscoroutinefunction(module.on_assistant_message):
-                        await module.on_assistant_message(assistant_message.get("content", ""))
-                    else:
-                        module.on_assistant_message(assistant_message.get("content", ""))
-                except Exception as e:
-                    core.log(module.name, f"could not run assistant message hook: {e}")
+            await self.context.chat.add(assistant_message)
+
+            # run module event hooks
+            for module_name, module in self.manager.modules.items():
+                if hasattr(module, "on_assistant_message"):
+                    try:
+                        if asyncio.iscoroutinefunction(module.on_assistant_message):
+                            await module.on_assistant_message(assistant_message.get("content", ""))
+                        else:
+                            module.on_assistant_message(assistant_message.get("content", ""))
+                    except Exception as e:
+                        core.log(module.name, f"could not run assistant message hook: {e}")
 
     async def announce(self, message: str, type=None):
         """called externally to announce things in this channel, such as a reminder sent by the AI"""

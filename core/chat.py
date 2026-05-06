@@ -383,8 +383,6 @@ class Chat:
             messages and
             # and the last message was an assistant message
             messages[-1].get("role") == "assistant" and
-            # and that last assistant message didn't have toolcalls
-            not messages[-1].get("tool_calls") and
             # and the message we're about to post is an assistant message
             message.get("role") == "assistant"
         ):
