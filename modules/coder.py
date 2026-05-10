@@ -1149,7 +1149,7 @@ class Coder(modules.sandboxed_files.SandboxedFiles):
     async def list_full_project_tree(self, project_name: str, depth_limit: int = 5, max_files_per_folder: int = 50):
         """Returns a recursive tree representation of the project structure. Use this to understand the overall project layout before diving into specific files."""
         project_path = self._get_project_path(project_name)
-        print(self.config.get("limits", "folder_blacklist", default=[]))
+
         if not os.path.exists(project_path):
             return self.result("error: project does not exist", success=False)
 
@@ -1189,7 +1189,7 @@ class Coder(modules.sandboxed_files.SandboxedFiles):
             return self.result(f"error: {e}", success=False)
 
     async def list_project_folder(self, project_name: str, sub_path: list = None):
-        """Lists the immediate contents of a specific path within a project (non-recursive)."""
+        """Lists the immediate contents of a specific path within a project (non-recursive). The path is a list of path elements, e.g. ['src', 'main.py'] translates to src/main.py"""
         sub_path = sub_path or []
         target_path = self._get_project_path(project_name)
         if sub_path:

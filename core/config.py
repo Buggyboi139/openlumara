@@ -28,6 +28,7 @@ default_config = {
         "name": "",
         "temperature": 0.7,
         "enable_thinking": True,
+        "keep_reasoning_in_context": True,
         "reasoning_effort": None,
         "use_tools": True
     },

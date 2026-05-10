@@ -21,6 +21,24 @@ class Channel:
         # load channel config
         self.config = core.config.ConfigManager(core.config.config, ["channels", "settings", self.name])
 
+        self._shutting_down = False
+
+        # start the "push queue" which handles messages that are pushed to channels without
+        # the user first sending a message. this is what powers announcements and the like
+        self.push_queue = asyncio.Queue()
+        self._queue_task = None
+
+    async def _shutdown(self):
+        """internal shutdown function. gets called by the manager before on_shutdown()"""
+
+        self._shutting_down = True
+        if self._queue_task:
+            self._queue_task.cancel()
+            try:
+                await self._queue_task
+            except asyncio.CancelledError:
+                pass
+
     async def _set_as_active_channel(self):
         self.manager.channel = self
 
@@ -61,29 +79,83 @@ class Channel:
         # fallback
         return ""
 
-    async def _poll_loop(self):
-        """constantly polls the chat history to see if anything new arrived, and if so, triggers the respective event methods"""
-        if not hasattr(self, "on_message"):
-            core.log(self.name, "FATAL ERROR: missing on_message() method. Could not start message polling loop.")
+    def _format_message(self, message: dict):
+        formatted = ""
+
+        role = message.get("role")
+        if role in ("user", "assistant"):
+            reasoning_content = message.get("reasoning_content")
+            if reasoning_content:
+                formatted += reasoning_content
+                formatted += "\n\n"
+
+            content = message.get("content")
+            if content:
+                if reasoning_content:
+                    formatted += "---"
+
+                formatted += content
+                formatted += "\n\n"
+
+        if role == "assistant":
+            if message.get("tool_calls"):
+                for tool_call in message.get("tool_calls"):
+                    formatted += self.tc_manager.display_call(tool_call)+"\n"
+
+                formatted += "\n\n"
+
+        if role == "tool":
+            formatted = "(received tool results)"
+
+        message["content"] = formatted.strip()
+
+        return message
+
+    async def _start_push_queue(self):
+        if not hasattr(self, "on_push"):
             return
+        core.log(self.name, "starting message push queue consumer")
+        self._queue_task = asyncio.create_task(self._push_consumer())
 
-        chat_history = await self.context.chat.get()
-        last_fetched_index = len(chat_history)
+    async def _push_consumer(self):
+        """Consumes messages from the queue and triggers on_push sequentially"""
+        while not getattr(self, "_shutting_down", False):
+            try:
+                message = await self.push_queue.get()
+                await self.on_push(self._format_message(message))
+                self.push_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                # Always log full traceback for easier debugging
+                import traceback
+                traceback.print_exc()
+                core.log(self.name, f"error in message consumer: {str(e)}")
+                await asyncio.sleep(0.5)
 
-        while True:
-            new_messages = await self.context.chat.get_since(last_fetched_index)
-            if new_messages:
-                core.log(self.name, "detected new message")
-
-            for message in new_messages:
-                if message.get("content") == "[SYSTEM TICK]":
-                    continue
-
-                await self.on_message(message)
-
-                last_fetched_index += 1
-
-            await asyncio.sleep(1)
+    # async def _poll_loop(self):
+    #     """constantly polls the chat history to see if anything new arrived, and triggers on_message for every new message"""
+    #     if not hasattr(self, "on_message"):
+    #         return False
+    #
+    #     core.log(self.name, "started message polling loop")
+    #
+    #     while not getattr(self, "_shutting_down", False):
+    #         try:
+    #             # check for new messages
+    #             new_messages = await self.context.chat.get_new()
+    #
+    #             if new_messages:
+    #                 for message in new_messages:
+    #                     # trigger the event
+    #                     await self.on_message(self._format_message(message))
+    #
+    #             await asyncio.sleep(0.1)
+    #
+    #         except Exception as e:
+    #             core.log(self.name, f"error in poll loop: {str(e)}")
+    #             # if we hit an error, back off for a second so we don't spam the logs
+    #             await asyncio.sleep(1)
 
     async def send(self, message: dict):
         """sends a message to the AI from within the current channel"""
@@ -102,6 +174,9 @@ class Channel:
                 try:
                     cmd_response = await self.commands.process_input(message)
                 except Exception as e:
+                    # Always log full traceback for easier debugging
+                    import traceback
+                    traceback.print_exc()
                     core.log_error("error while executing command", e)
 
                 if cmd_response:
@@ -119,6 +194,7 @@ class Channel:
 
         # add sent message to context
         add_success = await self.context.chat.add(message)
+
         if not add_success:
             return None
 
@@ -131,6 +207,9 @@ class Channel:
                     else:
                         module.on_user_message(message.get("content", ""))
                 except Exception as e:
+                    # Always log full traceback for easier debugging
+                    import traceback
+                    traceback.print_exc()
                     core.log(module.name, f"could not run user message hook: {e}")
 
         # then get the full context window
@@ -145,25 +224,11 @@ class Channel:
             error_msg = response.get("message", "Unknown error occurred")
             return {"role": "assistant", "content": f"API Error: {error_msg}\n\nUse /connect to retry."}
 
-        tool_calls = response.get("tool_calls")
-        if tool_calls:
-            toolcall_text = []
-            # process() does all the toolcalling, but it also returns the raw toolcall stream for our own use
-            async for sub_token in self.tc_manager.process(tool_calls):
-                toolcall_text.append(sub_token.get("content"))
+        # make a copy of the response message and edit it
+        assistant_message = dict(response)
+        assistant_message["role"] = "assistant"
 
-        # if no content, try the toolcall response text first
-        if not response.get("content") and tool_calls:
-            response["content"] = "".join(toolcall_text)
-
-        # otherwise fall back to reasoning content
-        if not response.get("content"):
-            reasoning_content = response.get("reasoning")
-            response["content"] = reasoning_content
-
-        # still no content? fuck it, lol
-        if not response.get("content"):
-            response["content"] = "AI returned a blank response."
+        tool_calls = assistant_message.get("tool_calls")
 
         # convert any toolcalls to a dict so that JSON serialization doesnt die
         if tool_calls:
@@ -174,21 +239,39 @@ class Channel:
                     tool_call = tool_call.model_dump(warnings=False)
                 toolcalls_converted.append(tool_call)
 
-            response["tool_calls"] = toolcalls_converted
+            assistant_message["tool_calls"] = toolcalls_converted
 
-        await self.context.chat.add({"role": "assistant", "content": response.get("content")})
+        if tool_calls:
+            # process() does all the toolcalling, but it also returns the raw toolcall stream for our own use
+            async for sub_token in self.tc_manager.process(
+                assistant_message,
+                push=True
+            ):
+                # push handles all the output
+                pass
+
+        # add to context
+        if not tool_calls:
+            await self.context.chat.add(assistant_message)
 
         # run module event hooks
         for module_name, module in self.manager.modules.items():
             if hasattr(module, "on_assistant_message"):
                 try:
                     if asyncio.iscoroutinefunction(module.on_assistant_message):
-                        await module.on_assistant_message(response.get("content", ""))
+                        await module.on_assistant_message(assistant_message.get("content", ""))
                     else:
-                        module.on_assistant_message(response.get("content", ""))
+                        module.on_assistant_message(assistant_message.get("content", ""))
                 except Exception as e:
+                    # Always log full traceback for easier debugging
+                    import traceback
+                    traceback.print_exc()
                     core.log(module.name, f"could not run assistant message hook: {e}")
-        return response
+
+        if tool_calls:
+            return None
+
+        return assistant_message
 
     async def send_stream(self, message: dict):
         """sends a message to the AI from within the current channel, streaming version"""
@@ -254,6 +337,9 @@ class Channel:
                     else:
                         module.on_user_message(message.get("content", ""))
                 except Exception as e:
+                    # Always log full traceback for easier debugging
+                    import traceback
+                    traceback.print_exc()
                     core.log(module.name, f"could not run user message hook: {e}")
 
         # get the new context window with the added message
@@ -290,12 +376,10 @@ class Channel:
                 yield token
                 tool_calls_occurred = True
 
+                toolcall_request = await self.tc_manager._build_recursive_request(token, final_content, final_reasoning)
+
                 # we add the accumulated content tokens so far to the assistant_content argument
-                async for sub_token in self.tc_manager.process(
-                    token.get("content"),
-                    assistant_content="".join(final_content),
-                    assistant_reasoning="".join(final_reasoning)
-                ):
+                async for sub_token in self.tc_manager.process(toolcall_request):
                     yield sub_token
                 # tc_manager.process() will loop until the AI no longer deems tool calls necessary
             elif token_type == "tool":
@@ -341,17 +425,41 @@ class Channel:
                         else:
                             module.on_assistant_message(assistant_message.get("content", ""))
                     except Exception as e:
+                        # Always log full traceback for easier debugging
+                        import traceback
+                        traceback.print_exc()
                         core.log(module.name, f"could not run assistant message hook: {e}")
+
+    async def on_push(self, message: dict):
+        raise NotImplementedError
+
+    async def push(self, message):
+        """
+        push a message to the push queue, which will instantly display it in all channels
+        without adding to context, making it invisible to the AI
+        """
+
+        if not hasattr(self, "push_queue"):
+            return False
+
+        # message can be either a str or a dict.
+        # if dict, just use it as-is
+        # otherwise, turn it into an openAI message dict
+        if isinstance(message, dict):
+            await self.context.chat.add(message, push=True)
+        else:
+            await self.context.chat.add({"role": "assistant", "content": str(message)}, push=True)
 
     async def announce(self, message: str, type=None):
         """called externally to announce things in this channel, such as a reminder sent by the AI"""
         if not type:
             type = "info"
 
-        core.log(self.name, "announce called")
-
         # insert announced message into context
         await self.context.chat.add({"role": "assistant", "content": f"[System {type}]: {message}"})
+
+        # and push it
+        await self.push(message)
 
     async def announce_all(self, message: str, type=None):
         """announces a message across all channels. useful for very important notifications!"""

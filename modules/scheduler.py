@@ -142,7 +142,7 @@ class Scheduler(core.module.Module):
         action = job.get("action")
 
         event_message = {
-            "role": "user",
+            "role": "developer" if job_channel.manager.API.supports_developer_role else "user",
             "content": f"""
     [AUTOMATED SYSTEM INSTRUCTION]
     Please follow these instructions:
@@ -189,9 +189,9 @@ class Scheduler(core.module.Module):
         if final_content:
             try:
                 if job_channel:
-                    await job_channel.announce(final_content, "schedule")
+                    await job_channel.push(final_content)
                 elif self.channel:
-                    await self.channel.announce(final_content, "schedule")
+                    await self.channel.push(final_content)
             except Exception as e:
                 core.log_error(f"[SCHEDULER] error announcing job {job_id} result", e)
 

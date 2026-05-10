@@ -83,7 +83,7 @@ class Manager:
         for channel_name, channel in self.channels.items():
             self._async_tasks.add(asyncio.create_task(channel.run()))
             # also start the message polling loop per channel
-            self._async_tasks.add(asyncio.create_task(channel._poll_loop()))
+            self._async_tasks.add(asyncio.create_task(channel._start_push_queue()))
             core.log("core", f"Started channel {channel_name}")
 
         if not self.channel:
@@ -187,8 +187,10 @@ class Manager:
                 core.log("core", f"Shutting down channel {channel_name}")
                 try:
                     if asyncio.iscoroutinefunction(channel.on_shutdown):
+                        await channel._shutdown()
                         await channel.on_shutdown()
                     else:
+                        await channel._shutdown()
                         channel.on_shutdown()
                 except Exception as e:
                     core.log("warning", f"Error shutting down {channel_name}: {e}")

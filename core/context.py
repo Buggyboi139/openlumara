@@ -38,9 +38,14 @@ class Context:
         # Get history from the chat (the full, untrimmed version)
         messages = copy.deepcopy(await self.chat.get())
 
-        # Remove ghost messages from history
+        # Remove ghost and push messages from history
         messages = [msg for msg in messages if not msg.get("ghost")]
+        messages = [msg for msg in messages if not msg.get("push")]
         
+        # If disabled, remove reasoning from all prior messages
+        if not core.config.get("model", "keep_reasoning_in_context"):
+            messages = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
+
         # Apply max_messages limit to history first
         if messages and len(messages) > max_messages:
             messages = messages[-max_messages:]
@@ -56,6 +61,11 @@ class Context:
                         part for part in content
                         if isinstance(part, dict) and part.get("type") == "text"
                     ]
+                elif isinstance(content, str):
+                    pass
+                else:
+                    # disallow non-string content
+                    continue
 
         end_msg = []
         if end_prompt:

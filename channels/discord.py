@@ -164,12 +164,21 @@ class Client(discord.Client):
                             response_obj = self.ai_channel.send_stream({"role": "user", "content": content})
                             response_content = await self._stream_to_discord(response_obj, message.channel)
                         else:
-                            response_content = await self.ai_channel.send({"role": "user", "content": content})
-                            await message.channel.send(response_content.get("content"), mention_author=self.ai_channel.config.get("use_replies"))
+                            response_obj = await self.ai_channel.send({"role": "user", "content": content})
 
-                        core.log("discord", f"<{message.guild.me.name}> {response_content}")
+                            if response_obj:
+                                response_content = response_obj.get("content")
+
+                                chunk_size = 1900
+                                chunks = [response_content[i:i + chunk_size] for i in range(0, len(response_content), chunk_size)]
+
+                                for chunk in chunks:
+                                    await message.channel.send(chunk, mention_author=self.ai_channel.config.get("use_replies"))
+                                    core.log("discord", f"<{message.guild.me.name}> {chunk}")
+                                    await asyncio.sleep(0.5)
                     except Exception as e:
-                        return await message.channel.send(f"error while sending request to AI: {e}")
+                        err_msg = core.detail_error(e) if core.debug else str(e)
+                        return await message.channel.send(f"error while sending request to AI: {err_msg}")
 
 class Discord(core.channel.Channel):
     settings =  {
@@ -183,20 +192,25 @@ class Discord(core.channel.Channel):
         "announce_shutdown": False
     }
 
-    async def on_message(self, msg: dict):
-        core.log("test", "on_message called")
-
-        if not msg:
+    async def on_push(self, message: dict):
+        if not message:
             return None
 
-        core.log("test", "proceeding with send")
+        if message.get("role") != "assistant":
+            return None
 
-        print(msg)
+        content = message.get("content")
+
+        # split the content into chunk sizes that discord accepts
+        chunk_size = 1900
+        chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
 
         for guild in self._client.guilds:
             for channel in guild.channels:
                 if isinstance(channel, discord.TextChannel) and channel.permissions_for(guild.me).view_channel:
-                    await channel.send(msg.get("content"))
+                    for chunk in chunks:
+                        await channel.send(chunk)
+                        await asyncio.sleep(0.5)
 
     async def run(self):
         token = core.config.config.get("channels").get("settings").get("discord").get("token")

@@ -115,7 +115,7 @@ class APIClient():
             # We send a minimal request using the 'developer' role.
             # We use a very short prompt to minimize token usage/cost.
             await client.chat.completions.create(
-                model="test-model", # Most APIs will ignore the model name if the error is role-based
+                model=self._model, # Most APIs will ignore the model name if the error is role-based
                 messages=[
                     {"role": "developer", "content": "test"},
                     {"role": "user", "content": "test"}
@@ -124,18 +124,6 @@ class APIClient():
             )
             return True
         except Exception as e:
-            error_message = str(e).lower()
-
-            # If the API returns an error specifically about the role, it doesn't support it.
-            # Common error indicators: "invalid role", "unknown role", "unexpected role"
-            if "role" in error_message:
-                return False
-
-            # If it's a different error (like 'model_not_found'), the API
-            # likely processed the roles correctly and failed later.
-            if "model" in error_message:
-                return True
-
             return False
 
     def set_model(self, name: str):
@@ -148,6 +136,10 @@ class APIClient():
 
     async def _request(self, context, tools=None, stream=False):
         """send a request to the LLM and return the response object"""
+
+        if not context:
+            # wtf just swallow it
+            return {"error": "blank_request", "message": "tried to send a blank request for some reason"}
 
         if not self.connected:
             # attempt to connect
@@ -174,11 +166,11 @@ class APIClient():
         }
 
         # add model param fields
-        for field, value in core.config.get("model", default={}).items():
-            if field in ["name", "use_tools", "reasoning_effort", "enable_thinking"]:
-                continue
-
-            req[field] = value
+        # for field, value in core.config.get("model", default={}).items():
+        #     if field in ["name", "use_tools", "reasoning_effort", "enable_thinking"]:
+        #         continue
+        #
+        #     req[field] = value
 
         reasoning_effort = core.config.get("model", {}).get("reasoning_effort")
         if reasoning_effort:
@@ -203,22 +195,29 @@ class APIClient():
             core.log_error("Authentication error - disconnecting", e)
             self.connected = False
             self._connection_error = "Authentication failed. Please check your API key."
-            return {"error": "auth_failed", "message": str(e)}
+
+            err_msg = core.detail_error(e) if core.debug else str(e)
+            return {"error": "auth_failed", "message": err_msg}
         except openai.APIConnectionError as e:
             core.log_error("Connection error - disconnecting", e)
             self.connected = False
             self._connection_error = "Lost connection to API server."
-            return {"error": "connection_lost", "message": str(e)}
+
+            err_msg = core.detail_error(e) if core.debug else str(e)
+            return {"error": "connection_lost", "message": err_msg}
         except openai.RateLimitError as e:
             core.log_error("Rate limit exceeded", e)
             return {"error": "rate_limit", "message": "Rate limit exceeded. Please wait and try again."}
         except openai.APIStatusError as e:
             core.log_error("API status error", e)
+
             return {"error": "api_error", "message": f"API error: {e.message}"}
         except Exception as e:
             core.log_error("error while sending request to AI", e)
             self.connected = False
-            return {"error": "unknown", "message": str(e)}
+
+            err_msg = core.detail_error(e) if core.debug else str(e)
+            return {"error": "unknown", "message": err_msg}
 
         if core.debug:
             core.log("debug:response", str(response))
@@ -431,7 +430,7 @@ class APIClient():
 
                 if final_tool_calls and core.config.get("model").get("use_tools", False):
                     # yield the full toolcall object as a single token to be interpreted by the function that is iterating through _recv_stream()
-                    yield {"type": "tool_calls", "content": final_tool_calls}
+                    yield {"type": "tool_calls", "tool_calls": final_tool_calls}
 
         except Exception as e:
             core.log_error("error while receiving response from AI", e)

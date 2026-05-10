@@ -254,12 +254,6 @@ class Chat:
             return None
 
         return self.data[self.current].get("messages", [])
-    async def get_since(self, fetch_index: int):
-        """get only new messages in current chat"""
-        if self.current is None:
-            return None
-
-        return self.data[self.current]["messages"][fetch_index:]
 
     async def get_id(self):
         if self.current is None:
@@ -276,12 +270,15 @@ class Chat:
         await self.save()
         return True
 
-    async def add(self, message: dict, ghost = False):
+    async def add(self, message: dict, ghost = False, push=False):
         """add message to current chat"""
         if self.current is None:
             await self.new()
 
-        await self._insert_blank_user_msg(message)
+        # make a copy so we don't modify the original reference
+        new_message = message.copy()
+
+        # await self._insert_blank_user_msg(new_message)
 
         # ensure message does not exceed token limits
         max_tokens = int(core.config.get("api").get("max_context", 8192))
@@ -290,7 +287,7 @@ class Chat:
         current_messages = self.data[self.current].get("messages", [])
         potential_messages = list(current_messages)
 
-        potential_messages.append(message)
+        potential_messages.append(new_message)
         
         # calculate tokens for this potential list
         new_token_count = await self.count_tokens(messages=potential_messages)
@@ -301,7 +298,7 @@ class Chat:
 
         if not self.data[self.current]["title"].strip():
             # auto-set title
-            msg_content = self.channel._extract_content(message)
+            msg_content = self.channel._extract_content(new_message)
             if isinstance(msg_content, str):
                 self.data[self.current]["title"] = msg_content[:100]+".." if len(msg_content) > 100 else msg_content
             else:
@@ -311,11 +308,18 @@ class Chat:
         # if marked as a ghost message, set the flag. gets handled in self.trim()
         # ghost messages are invisible to the AI
         if ghost:
-            message["ghost"] = True
+            new_message["ghost"] = True
 
-        self.data[self.current]["messages"].append(message)
+        if push:
+            # don't send push messages into context, do display them in chat history
+            new_message["push"] = True
+
+        self.data[self.current]["messages"].append(new_message)
+
+        if push and hasattr(self.channel, "push_queue"):
+            await self.channel.push_queue.put(new_message)
+
         index = len(self.data[self.current]["messages"]) - 1
-
         await self.save()
         return True
 
@@ -327,6 +331,7 @@ class Chat:
         self.data[self.current]["messages"].pop(index)
         index = len(self.data[self.current]["messages"]) - 1
         await self.save()
+
         return index
 
     async def _insert_blank_user_msg(self, message: dict):
