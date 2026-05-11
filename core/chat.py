@@ -291,7 +291,7 @@ class Chat:
         new_token_count = await self.count_tokens(messages=potential_messages)
 
         if new_token_count > max_tokens:
-            await self.channel.announce(f"Your request exceeds the token limit! It was {new_token_count} out of {max_tokens} tokens.")
+            await self.channel.push(f"Your request exceeds the token limit! It was {new_token_count} out of {max_tokens} tokens.")
             return False
 
         if not self.data[self.current]["title"].strip():
