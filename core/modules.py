@@ -5,7 +5,7 @@ import inspect
 # modules that should have their prompts inserted even when tools are off
 nonagentic = ("characters", "time")
 
-def load(package, base_class = None, filter: list = None):
+def load(package, base_class = None, filter: list = None, skip_reload: bool = False):
     """
     loops through the specified package imported with `import whatever`, then checks inside those packages for any classes that derive from base_class, and return a tuple of those classes so we can use them as modules, channels etc
 
@@ -31,8 +31,9 @@ def load(package, base_class = None, filter: list = None):
             module = importlib.import_module(f"{package.__name__}.{modname}")
             
             # Force reload to ensure we get the latest version of the module
-            # This is crucial for restarts where code might have been modified
-            importlib.reload(module)
+            # ONLY reload if skip_reload is False.
+            if not skip_reload:
+                importlib.reload(module)
 
             for attr_name in dir(module):
                 target_class = getattr(module, attr_name)

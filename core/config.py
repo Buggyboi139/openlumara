@@ -238,17 +238,6 @@ def _inject_settings_into_dict(target_dict, instances, section_key):
             # if the user has provided them in the config file.
             settings[name] = defaults.copy()
 
-def _get_file_checksum(filepath):
-    """Calculate MD5 checksum of a file."""
-    hasher = hashlib.md5()
-    try:
-        with open(filepath, 'rb') as f:
-            while chunk := f.read(8192):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-    except Exception:
-        return ""
-
 def _get_module_schema_cache():
     """
     Returns a dictionary containing the cached schemas and checksums for all modules/channels.
@@ -273,7 +262,7 @@ def _get_module_schema_cache():
         "user_modules": (user_modules, core.module.Module)
     }
 
-    needs_refresh = False
+    sections_to_refresh = set()
 
     # 1. Check for deletions or changes in existing cache
     for section_key, (package, _) in package_map.items():
@@ -282,7 +271,7 @@ def _get_module_schema_cache():
         for name in list(cache[section_key].keys()):
             if name not in available_names:
                 del cache[section_key][name]
-                needs_refresh = True
+                sections_to_refresh.add(section_key)
                 continue
 
             # Find the file path to check checksum
@@ -301,25 +290,25 @@ def _get_module_schema_cache():
 
             if found_file:
                 if cache[section_key][name].get("checksum") != _get_file_checksum(found_file):
-                    needs_refresh = True
+                    sections_to_refresh.add(section_key)
             else:
-                needs_refresh = True
+                sections_to_refresh.add(section_key)
 
         # 2. Check for new modules
-        if not needs_refresh:
+        if section_key not in sections_to_refresh:
             for name in available_names:
                 if name not in cache[section_key]:
-                    needs_refresh = True
+                    sections_to_refresh.add(section_key)
                     break
 
-        if needs_refresh:
-            break
-
     # 3. Refresh cache if needed
-    if needs_refresh:
-        for section_key, (package, base_class) in package_map.items():
+    if sections_to_refresh:
+        for section_key in sections_to_refresh:
+            package, base_class = package_map[section_key]
             try:
-                classes = core.modules.load(package, base_class)
+                # Skip reloading the package if it's 'channels' to avoid breaking the WebUI
+                skip_reload = (section_key == "channels")
+                classes = core.modules.load(package, base_class, skip_reload=skip_reload)
                 for cls in classes:
                     name = core.modules.get_name(cls)
                     settings = getattr(cls, 'settings', {})
@@ -349,10 +338,22 @@ def _get_module_schema_cache():
         try:
             with open(cache_path, 'w') as f:
                 json.dump(cache, f, indent=2)
-        except:
+        except Exception as e:
             core.log_error("failed to save module cache", e)
 
     return cache
+
+def _get_file_checksum(filepath):
+    """Calculate MD5 checksum of a file."""
+    hasher = hashlib.md5()
+    try:
+        with open(filepath, 'rb') as f:
+            while chunk := f.read(8192):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception:
+        return ""
+
 
 def get_schema(*args, **kwargs):
     """
