@@ -209,7 +209,6 @@ class Context:
             # when modules don't have a channel assigned yet, this error triggers. we handle it "gracefully".
             return {"current": 0, "max": max_tokens}
         except Exception as e:
-            core.log_error("error while fetching token usage", e)
             # Return a conservative estimate on error
             return {"current": 0, "max": max_tokens}
 
