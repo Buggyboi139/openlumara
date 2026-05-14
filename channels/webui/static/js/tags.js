@@ -101,8 +101,15 @@ function toggleTagFilter(tag) {
 
 function clearTagFilter() {
     activeTagFilter = null;
+    const clearBtn = document.getElementById('clear-tag-filter');
+    if (clearBtn) {
+        clearBtn.style.display = 'none';
+    }
     renderTagFilter();
     filterChatsByTag();
+    if (typeof updateTagsForCategory === 'function') {
+        updateTagsForCategory(activeCategory);
+    }
 }
 
 function filterChatsByTag() {
