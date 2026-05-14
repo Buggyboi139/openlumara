@@ -10,8 +10,7 @@ BUILTIN_COMMANDS = {
         "prompt": "show system prompt",
         "prompt <module name>": "show system prompt for that module",
         "history": "show full chat history",
-        "context full": "show full context being sent to AI",
-        "context raw": "show full context as raw JSON",
+        "context": "show full context being sent to AI",
         "status": "show status info",
         "config": "Explore, view, and set config settings",
         "restart": "restarts the server",
@@ -495,7 +494,7 @@ class Commands:
                 else:
                     return str(_get_config_value(path_to_use))
 
-            case "context":
+            case "history":
                 """shows current context window"""
 
                 if not core.config.get("api").get("context_window", True):
@@ -506,10 +505,6 @@ class Commands:
                 context = await self.channel.context.get(system_prompt=show_system_prompt)
                 if not context:
                     return "BLANK"
-
-                if len(args) and args[0] == "raw":
-                    import json
-                    return json.dumps(context, indent=2)
 
                 context_display = []
 
@@ -535,6 +530,11 @@ class Commands:
                 context_display.append(f"== context size ==\n{ctx_string}")
 
                 return "\n\n".join(context_display)
+
+            case "context":
+                context = await self.channel.context.get(system_prompt=True)
+                import json
+                return json.dumps(context, indent=2)
 
             case "prompt":
                 """shows only the system prompt"""

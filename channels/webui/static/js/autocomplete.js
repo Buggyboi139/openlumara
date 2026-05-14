@@ -67,7 +67,8 @@ function handleInput(e) {
     }
 
     // Get typed text after prefix
-    const typedText = trimmed.slice(commandPrefix.length).toLowerCase();
+    const typedText = trimmed.toLowerCase();
+    const typedTextWithoutPrefix = trimmed.slice(commandPrefix.length).toLowerCase();
 
     // Filter commands
     let matchingCommands = [];
@@ -82,7 +83,7 @@ function handleInput(e) {
             const nameLower = cmdName.toLowerCase();
             const descLower = (cmdDesc || '').toLowerCase();
 
-            if (nameLower.startsWith(typedText) || descLower.includes(typedText)) {
+            if (nameLower.startsWith(typedText) || descLower.includes(typedTextWithoutPrefix)) {
                 // 3. Push a standardized object so the rest of your code works!
                 matchingCommands.push({
                     name: cmdName,
@@ -98,7 +99,7 @@ function handleInput(e) {
         return;
     }
 
-    showAutocomplete(matchingCommands, typedText);
+    showAutocomplete(matchingCommands, typedTextWithoutPrefix);
 }
 
 
