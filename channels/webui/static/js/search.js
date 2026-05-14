@@ -17,7 +17,6 @@ function toggleSearch() {
 function clearSearch() {
     const container = document.getElementById('search-container');
     const input = document.getElementById('search-input');
-    const count = document.getElementById('search-count');
     const indexEl = document.getElementById('search-index');
 
     // Restore original message contents
@@ -25,8 +24,7 @@ function clearSearch() {
 
     container.classList.remove('active');
     input.value = '';
-    if (count) count.textContent = '';
-    if (indexEl) indexEl.textContent = '';
+    if (indexEl) indexEl.textContent = '0 / 0';
     searchQuery = '';
     searchResults = [];
     currentSearchIndex = -1;
@@ -55,10 +53,8 @@ function performSearch(query) {
     restoreOriginalContents();
 
     if (!searchQuery) {
-        const countEl = document.getElementById('search-count');
         const indexEl = document.getElementById('search-index');
-        if (countEl) countEl.textContent = '';
-        if (indexEl) indexEl.textContent = '';
+        if (indexEl) indexEl.textContent = '0 / 0';
         searchResults = [];
         currentSearchIndex = -1;
         updateSearchNavButtons();
@@ -87,19 +83,14 @@ function performSearch(query) {
         }
     });
 
-    const countEl = document.getElementById('search-count');
     const indexEl = document.getElementById('search-index');
-
-    if (countEl) {
-        countEl.textContent = searchResults.length + ' result' + (searchResults.length !== 1 ? 's' : '');
-    }
 
     // Scroll to first result
     if (searchResults.length > 0) {
         currentSearchIndex = 0;
         scrollToSearchResult(0);
     } else if (indexEl) {
-        indexEl.textContent = '';
+        indexEl.textContent = '0 / 0';
     }
 
     updateSearchNavButtons();
