@@ -37,6 +37,6 @@ class TokenThreshold(core.module.Module):
         if used_percentage >= warning_threshold_percent:
             remaining_percentage = 100 - used_percentage
 
-            return f"WARNING: Approaching token limit! You have used {used_percentage:.1f}% of the allowed tokens. {remaining_percentage:.1f}% remaining. Warn the user!!"
+            return f"WARNING: Approaching token limit! You have used {used_percentage:.1f}% of the allowed tokens. {remaining_percentage:.1f}% remaining. Warn the user!! The user might want to use `/compress` to summarize the chat so far (the user won't lose chat history, but the AI won't see the messages anymore). Or the user can use `/new` to start a new chat."
         else:
             return None

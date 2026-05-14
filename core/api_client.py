@@ -29,20 +29,42 @@ class APIClient():
 
         self.supports_developer_role = False
 
+    def _get_user_friendly_message(self, error_type, exception=None):
+        """
+        Maps technical error types to polite, actionable messages for end-users.
+        """
+        messages = {
+            "auth_failed": "Your API key is invalid or expired. Please check your configuration settings.",
+            "connection_lost": "We lost connection to the AI server. Please check your internet connection and try again.",
+            "rate_limit": "You are sending requests too quickly. Please wait a moment before trying again.",
+            "api_error": "The AI service is currently experiencing issues. Please try again in a few minutes.",
+            "cancelled": "The request was cancelled.",
+            "blank_request": "The request was empty. Please try typing your message again.",
+            "processing_failed": "We had trouble reading the response from the AI. Please try sending your message again.",
+            "invalid_response": "The AI returned an unexpected format. Please try again.",
+            "unknown": "An unexpected error occurred. If this persists, please contact support.",
+            "not_connected": "The AI service is not connected. Please check your connection settings."
+        }
+
+        # Fallback to a generic message if the key isn't found
+        base_msg = messages.get(error_type, messages["unknown"])
+
+        # If we are in debug mode, append the technical detail for developers
+        if core.debug and exception:
+            return f"{base_msg} (Technical detail: {str(exception)})"
+
+        return base_msg
+
     async def connect(self):
         if self.connected:
-            # dont unnecessarily connect
             return True
 
         self._model = core.config.get("model", {}).get("name")
         self._connection_attempts += 1
-
         api_config = core.config.get("api", {})
 
-        # initialize connection to the API
         try:
             if self.manager.args.insecure_tls:
-                # Allow opting out of TLS validation for self-signed certs or hostname mismatches.
                 import httpx
                 self._httpx_client = httpx.AsyncClient(verify=False)
                 core.log("API", "WARNING: TLS certificate and hostname verification are disabled")
@@ -55,17 +77,18 @@ class APIClient():
             await self._AI.models.list()
         except openai.AuthenticationError as e:
             await self.disconnect()
-            self._connection_error = "Invalid API key. Please check your configuration."
+            self._connection_error = self._get_user_friendly_message("auth_failed", e)
             core.log("API", f"Authentication failed: {e}")
             return False
         except openai.APIConnectionError as e:
             await self.disconnect()
-            self._connection_error = f"Could not reach API server at {api_config.get('url')}"
+            self._connection_error = self._get_user_friendly_message("connection_lost", e)
             core.log("API", f"Connection failed: {e}")
             return False
         except Exception as e:
             await self.disconnect()
-            self._connection_error = f"Connection error: {str(e)}"
+            self._connection_error = self._get_user_friendly_message("unknown", e)
+            core.log("API", f"Unexpected connection error: {e}")
             return False
 
         self.connected = True
@@ -188,57 +211,52 @@ class APIClient():
         try:
             # check for cancellation before starting the request
             if self.cancel_request:
-                return {"error": "cancelled", "message": "request was cancelled before it could start"}
+                return {"error": "cancelled", "message": self._get_user_friendly_message("cancelled")}
 
             # wrap the request in a way that we can check for cancellation
-            # since openai's async client doesn't natively support an abort signal 
+            # since openai's async client doesn't natively support an abort signal
             # easily through the high-level chat.completions.create, we use a task
             # so we can actually cancel the task itself.
-            
+
             request_task = asyncio.create_task(self._AI.chat.completions.create(**req))
-            
+
             # monitor the task and the cancel_request flag
             while not request_task.done():
                 if self.cancel_request:
                     request_task.cancel()
-                    return {"error": "cancelled", "message": "request was cancelled during processing"}
+                    return {"error": "cancelled", "message": self._get_user_friendly_message("cancelled")}
                 await asyncio.sleep(0.1)
 
             response = await request_task
 
         except asyncio.CancelledError:
             core.log_error("request was cancelled", None)
-            return {"error": "cancelled", "message": "request was cancelled"}
+            return {"error": "cancelled", "message": self._get_user_friendly_message("cancelled")}
+
         except openai.AuthenticationError as e:
-            core.log_error("Authentication error - disconnecting", e)
+            core.log_error("Authentication error", e)
             self.connected = False
-            self._connection_error = "Authentication failed. Please check your API key."
+            self._connection_error = self._get_user_friendly_message("auth_failed", e)
+            return {"error": "auth_failed", "message": self._connection_error}
 
-            err_msg = core.detail_error(e) if core.debug else str(e)
-            return {"error": "auth_failed", "message": err_msg}
         except openai.APIConnectionError as e:
-            core.log_error("Connection error - disconnecting", e)
+            core.log_error("Connection error", e)
             self.connected = False
-            self._connection_error = "Lost connection to API server."
+            self._connection_error = self._get_user_friendly_message("connection_lost", e)
+            return {"error": "connection_lost", "message": self._connection_error}
 
-            err_msg = core.detail_error(e) if core.debug else str(e)
-            return {"error": "connection_lost", "message": err_msg}
         except openai.RateLimitError as e:
             core.log_error("Rate limit exceeded", e)
-            return {"error": "rate_limit", "message": "Rate limit exceeded. Please wait and try again."}
+            return {"error": "rate_limit", "message": self._get_user_friendly_message("rate_limit", e)}
+
         except openai.APIStatusError as e:
             core.log_error("API status error", e)
+            return {"error": "api_error", "message": self._get_user_friendly_message("api_error", e)}
 
-            return {"error": "api_error", "message": f"API error: {e.message}"}
         except Exception as e:
             core.log_error("error while sending request to AI", e)
             self.connected = False
-
-            err_msg = core.detail_error(e) if core.debug else str(e)
-            return {"error": "unknown", "message": err_msg}
-
-        if core.debug:
-            core.log("debug:response", str(response))
+            return {"error": "unknown", "message": self._get_user_friendly_message("unknown", e)}
 
         return response
 
@@ -262,7 +280,7 @@ class APIClient():
             return result
         except Exception as e:
             core.log_error("error while processing response from AI", e)
-            return {"error": "processing_failed", "message": str(e)}
+            return {"error": "processing_failed", "message": self._get_user_friendly_message("processing_failed", e)}
 
     async def send_stream(self, context: list, use_tools=True, tools=None, use_thinking=True):
         """send a message to the LLM. is an iterable async generator"""
@@ -290,7 +308,7 @@ class APIClient():
                 yield token
         except Exception as e:
             core.log_error("error while sending request to AI", e)
-            yield {"type": "error", "content": {"error": "stream_failed", "message": str(e)}}
+            yield {"type": "error", "content": {"error": "stream_failed", "message": self._get_user_friendly_message("processing_failed", e)}}
 
     async def cancel(self):
         """cancel a request that's been sent to the AI"""
@@ -307,7 +325,7 @@ class APIClient():
             response_main = response.choices[0]
         except Exception as e:
             core.log_error("error while receiving response from AI", e)
-            return {"error": "invalid_response", "message": str(e)}
+            return {"error": "invalid_response", "message": self._get_user_friendly_message("invalid_response", e)}
 
         reasoning_content = getattr(response_main.message, "reasoning_content", None) or \
                             getattr(response_main.message, "reasoning", None) or ""
@@ -455,6 +473,7 @@ class APIClient():
 
         except Exception as e:
             core.log_error("error while receiving response from AI", e)
+            raise e # Re-raise so send_stream can catch it and yield the error type
 
     async def list_models(self):
         if not self.connected:
