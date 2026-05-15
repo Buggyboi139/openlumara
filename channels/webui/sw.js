@@ -1,14 +1,25 @@
-const CACHE_NAME = 'openlumara-v4.0.1';
+const CACHE_NAME = 'openlumara-v4.0.2';
 const ASSETS = ['/', '/manifest.json'];
 
 self.addEventListener('install', (e) => {
+    // Force the waiting service worker to become the active service worker.
+    self.skipWaiting();
+
     e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
 });
 
 self.addEventListener('activate', (e) => {
-    e.waitUntil(caches.keys().then(keys => 
-        Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    ));
+    // Immediately take control of all open clients (tabs/windows).
+    e.waitUntil(
+        Promise.all([
+            // 1. Clean up old caches
+            caches.keys().then(keys =>
+            Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+            ),
+            // 2. Claim clients
+            self.clients.claim()
+        ])
+    );
 });
 
 self.addEventListener('fetch', (e) => {
