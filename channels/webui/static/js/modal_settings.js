@@ -2813,7 +2813,7 @@ function createThemeSection() {
 
     typingFreqRow.innerHTML = `
     <div class="slider-header">
-    <span class="slider-label">Typing Frequency</span>
+    <span class="slider-label">Typing Sound Frequency</span>
     <span class="slider-value" id="typing-freq-value">${savedFreq} Hz</span>
     </div>
     <div class="slider-track-wrapper">
