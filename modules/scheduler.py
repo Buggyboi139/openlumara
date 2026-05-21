@@ -318,8 +318,6 @@ class Scheduler(core.module.Module):
                 # allow a choice between sending full context or sending only the instruction
                 final_messages = [instruction_message_pure] if use_token_efficient else private_messages
 
-                print(final_messages)
-
                 response = await self.manager.API.send(
                     final_messages,
                     use_tools=True,
