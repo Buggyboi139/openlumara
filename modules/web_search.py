@@ -7,7 +7,14 @@ from urllib.parse import urlparse
 
 
 class WebSearch(modules.http.Http):
-    """Lets your AI search the web!"""
+    """
+    Lets your AI search the web!
+    
+    Enhanced with multi-layer prompt injection defense based on:
+    - OWASP LLM01:2025 Prompt Injection Prevention
+    - Digital Applied's 12-Layer Framework
+    - Defense-in-depth: multiple overlapping controls
+    """
 
     settings = {
         "max_results": {
@@ -101,6 +108,13 @@ class WebSearch(modules.http.Http):
                       url_key: str, fields: tuple):
         """
         Shared search routine for all result types.
+        
+        Enhanced with multi-layer sanitization:
+        - Injection detection on all text fields
+        - HTML entity decoding and URL decoding
+        - Zero-width character removal
+        - Homoglyph normalization
+        - Base64 payload detection
 
         Args:
             kind:        DDGS method name ('text', 'images', 'news', ...).
@@ -119,8 +133,11 @@ class WebSearch(modules.http.Http):
             with DDGS(proxy=proxy) as ddgs:
                 raw_results = list(getattr(ddgs, kind)(query, max_results=max_res))
                 sanitized_results = []
+                
                 for res in raw_results:
                     url = res.get(url_key, "")
+                    
+                    # Check URL policy first
                     if not self._url_passes_policy(url):
                         redacted = {f: "[REDACTED]" for f in fields}
                         redacted[url_key] = "[REDACTED]"
@@ -131,9 +148,26 @@ class WebSearch(modules.http.Http):
                         sanitized_results.append(redacted)
                         continue
 
+                    # Sanitize all text fields with enhanced pipeline
                     for f in fields:
-                        res[f] = res.get(f, "")
+                        original = res.get(f, "")
+                        if isinstance(original, str) and original.strip():
+                            # Use enhanced sanitization with injection detection
+                            sanitization_result = modules.http.ContentSanitizer.sanitize_with_detection(original)
+                            res[f] = sanitization_result['sanitized_content']
+                            
+                            # Log if injection was detected
+                            if sanitization_result['risk_level'] in ('medium', 'high', 'critical'):
+                                self._log(
+                                    f"Search result injection detected in '{f}': "
+                                    f"{sanitization_result['detection_result']['patterns_found']} "
+                                    f"(risk: {sanitization_result['risk_level']})"
+                                )
+                        else:
+                            res[f] = original
+                    
                     sanitized_results.append(res)
+                
                 return sanitized_results
 
         try:
