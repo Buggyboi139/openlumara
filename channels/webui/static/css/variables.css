@@ -87,3 +87,5 @@
     --bg-pattern-size: 200px 200px;
     --message-decoration: none;
 }
+
+@import url('/static/css/llamacalc_overrides.css');
