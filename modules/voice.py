@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from pathlib import Path
 
 import core
 
@@ -75,7 +74,7 @@ class Voice(core.module.Module):
         "tts": {
             "provider": {
                 "default": "kokoro_onnx",
-                "description": "Text-to-speech provider: kokoro_onnx or disabled."
+                "description": "Text-to-speech provider: kokoro_onnx, chatterbox, chatterbox_turbo, or disabled."
             },
             "model_path": {
                 "default": "models/kokoro/kokoro-v1.0.onnx",
@@ -95,7 +94,7 @@ class Voice(core.module.Module):
             },
             "speed": {
                 "default": 1.0,
-                "description": "Speech speed multiplier."
+                "description": "Speech speed multiplier for Kokoro. Chatterbox ignores this."
             },
             "ffmpeg_path": {
                 "default": "ffmpeg",
@@ -104,6 +103,26 @@ class Voice(core.module.Module):
             "opus_bitrate": {
                 "default": "32k",
                 "description": "Bitrate for Telegram voice replies."
+            },
+            "chatterbox_device": {
+                "default": "cpu",
+                "description": "Device for Chatterbox: cpu, cuda, mps, or auto. AMD users should usually start with cpu."
+            },
+            "chatterbox_voice_prompt_path": {
+                "default": "",
+                "description": "Optional reference voice audio path for Chatterbox voice cloning. Leave blank for default voice."
+            },
+            "chatterbox_exaggeration": {
+                "default": 0.5,
+                "description": "Chatterbox emotion intensity. Try 0.35 to 0.7 before getting theatrical."
+            },
+            "chatterbox_cfg_weight": {
+                "default": 0.5,
+                "description": "Chatterbox pacing/control weight. Lower can be faster; higher can be more deliberate."
+            },
+            "chatterbox_temperature": {
+                "default": 0.8,
+                "description": "Chatterbox sampling temperature. Lower is more consistent, higher is more varied."
             }
         },
         "telegram": {
@@ -113,7 +132,7 @@ class Voice(core.module.Module):
             },
             "send_voice_replies": {
                 "default": True,
-                "description": "Send Kokoro voice replies for Telegram voice messages."
+                "description": "Send voice replies for Telegram voice messages."
             },
             "send_text_with_voice": {
                 "default": True,
@@ -134,6 +153,8 @@ class Voice(core.module.Module):
         os.makedirs(self.target_path, exist_ok=True)
 
         self._kokoro = None
+        self._chatterbox = None
+        self._chatterbox_turbo = None
         self._faster_whisper = None
 
     # ------------------------------------------------------------------
@@ -223,6 +244,28 @@ class Voice(core.module.Module):
         if result.returncode != 0 or not os.path.exists(output_path):
             raise RuntimeError(f"ffmpeg Opus encode failed: {result.stderr.strip()[:800]}")
         return output_path
+
+    def _write_wav_file(self, samples, sample_rate: int) -> str:
+        try:
+            import numpy as np
+            import soundfile as sf
+        except Exception as e:
+            raise RuntimeError("numpy and soundfile are required for TTS audio writing.") from e
+
+        if hasattr(samples, "detach"):
+            samples = samples.detach().cpu().numpy()
+        elif hasattr(samples, "cpu") and hasattr(samples.cpu(), "numpy"):
+            samples = samples.cpu().numpy()
+        else:
+            samples = np.asarray(samples)
+
+        # torch/torchaudio often returns [channels, samples]. soundfile wants [samples, channels].
+        if getattr(samples, "ndim", 1) == 2 and samples.shape[0] <= 8 and samples.shape[1] > samples.shape[0]:
+            samples = samples.T
+
+        wav_path = self._new_temp_path(".wav")
+        sf.write(wav_path, samples, int(sample_rate))
+        return wav_path
 
     # ------------------------------------------------------------------
     # STT
@@ -369,11 +412,6 @@ class Voice(core.module.Module):
                     return kokoro.create(text, voice, speed)
 
     def _synthesize_kokoro_sync(self, text: str) -> str:
-        try:
-            import soundfile as sf
-        except Exception as e:
-            raise RuntimeError("soundfile is not installed. Run: pip install soundfile") from e
-
         text = self._safe_text(text)
         if not text:
             raise ValueError("No text provided for speech synthesis.")
@@ -386,9 +424,94 @@ class Voice(core.module.Module):
         else:
             samples, sample_rate = created, 24000
 
-        wav_path = self._new_temp_path(".wav")
-        sf.write(wav_path, samples, int(sample_rate))
-        return wav_path
+        return self._write_wav_file(samples, int(sample_rate))
+
+    def _resolve_chatterbox_device(self) -> str:
+        device = (self._cfg("tts", "chatterbox_device", default="cpu") or "cpu").lower().strip()
+        if device != "auto":
+            return device
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        return "cpu"
+
+    def _get_chatterbox(self):
+        if self._chatterbox is not None:
+            return self._chatterbox
+
+        try:
+            from chatterbox.tts import ChatterboxTTS
+        except Exception as e:
+            raise RuntimeError("chatterbox-tts is not installed. Run: pip install chatterbox-tts") from e
+
+        device = self._resolve_chatterbox_device()
+        self._chatterbox = ChatterboxTTS.from_pretrained(device=device)
+        return self._chatterbox
+
+    def _get_chatterbox_turbo(self):
+        if self._chatterbox_turbo is not None:
+            return self._chatterbox_turbo
+
+        try:
+            from chatterbox.tts_turbo import ChatterboxTurboTTS
+        except Exception as e:
+            raise RuntimeError("Chatterbox Turbo is not available in this chatterbox-tts install. Upgrade chatterbox-tts or use provider chatterbox.") from e
+
+        device = self._resolve_chatterbox_device()
+        self._chatterbox_turbo = ChatterboxTurboTTS.from_pretrained(device=device)
+        return self._chatterbox_turbo
+
+    def _chatterbox_generate(self, model, text: str, require_prompt: bool = False):
+        prompt_path = self._resolve_path(self._cfg("tts", "chatterbox_voice_prompt_path", default="") or "")
+        if require_prompt and not prompt_path:
+            raise ValueError("chatterbox_turbo requires voice.tts.chatterbox_voice_prompt_path.")
+        if prompt_path and not os.path.exists(prompt_path):
+            raise FileNotFoundError(f"Chatterbox voice prompt not found: {prompt_path}")
+
+        exaggeration = float(self._cfg("tts", "chatterbox_exaggeration", default=0.5) or 0.5)
+        cfg_weight = float(self._cfg("tts", "chatterbox_cfg_weight", default=0.5) or 0.5)
+        temperature = float(self._cfg("tts", "chatterbox_temperature", default=0.8) or 0.8)
+
+        kwargs = {
+            "exaggeration": exaggeration,
+            "cfg_weight": cfg_weight,
+            "temperature": temperature,
+        }
+        if prompt_path:
+            kwargs["audio_prompt_path"] = prompt_path
+
+        # Chatterbox APIs have moved around a bit. Try rich kwargs, then fall back.
+        try:
+            return model.generate(text, **kwargs)
+        except TypeError:
+            kwargs.pop("temperature", None)
+            try:
+                return model.generate(text, **kwargs)
+            except TypeError:
+                kwargs.pop("cfg_weight", None)
+                try:
+                    return model.generate(text, **kwargs)
+                except TypeError:
+                    kwargs.pop("exaggeration", None)
+                    try:
+                        return model.generate(text, **kwargs)
+                    except TypeError:
+                        return model.generate(text)
+
+    def _synthesize_chatterbox_sync(self, text: str, turbo: bool = False) -> str:
+        text = self._safe_text(text)
+        if not text:
+            raise ValueError("No text provided for speech synthesis.")
+
+        model = self._get_chatterbox_turbo() if turbo else self._get_chatterbox()
+        wav = self._chatterbox_generate(model, text, require_prompt=turbo)
+        sample_rate = int(getattr(model, "sr", 24000) or 24000)
+        return self._write_wav_file(wav, sample_rate)
 
     async def synthesize_speech(self, text: str):
         """
@@ -401,10 +524,15 @@ class Voice(core.module.Module):
             provider = (self._cfg("tts", "provider", default="kokoro_onnx") or "disabled").lower()
             if provider in ("disabled", "off", "none"):
                 return self.result("Text-to-speech is disabled.", success=False)
-            if provider != "kokoro_onnx":
+            if provider == "kokoro_onnx":
+                wav_path = await asyncio.to_thread(self._synthesize_kokoro_sync, text)
+            elif provider == "chatterbox":
+                wav_path = await asyncio.to_thread(self._synthesize_chatterbox_sync, text, False)
+            elif provider == "chatterbox_turbo":
+                wav_path = await asyncio.to_thread(self._synthesize_chatterbox_sync, text, True)
+            else:
                 return self.result(f"Unknown TTS provider: {provider}", success=False)
 
-            wav_path = await asyncio.to_thread(self._synthesize_kokoro_sync, text)
             return self.result({"path": wav_path, "format": "wav"})
         except Exception as e:
             core.log("voice", f"speech synthesis failed: {e}")
