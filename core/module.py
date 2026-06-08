@@ -126,6 +126,21 @@ class Module:
 # Registry format: {"command_name": [(class_type, method), ...]}
 _command_registry = {}
 
+def tool(risk="read", timeout=None):
+    """
+    Decorator to mark a module method as an AI-callable tool.
+
+    Existing modules continue to work through legacy public-method auto-discovery
+    while new modules can mark intended tools explicitly. Disable legacy
+    discovery with tools.legacy_auto_tools: false.
+    """
+    def decorator(func):
+        func._is_tool = True
+        func._tool_risk = risk
+        func._tool_timeout = timeout
+        return func
+    return decorator
+
 def command(name, help=None, send_to_ai=False):
     """
     Decorator to register a method as a command handler.

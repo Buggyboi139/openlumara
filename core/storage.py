@@ -3,8 +3,37 @@ import os
 import json
 import yaml
 import msgpack
+import tempfile
+import threading
 
 TEMPORARY = False
+
+def _atomic_write(path, content, binary=False):
+    """Write a file atomically using a temp file in the same directory."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory,
+        prefix=f".{os.path.basename(path)}.",
+        suffix=".tmp"
+    )
+
+    mode = "wb" if binary else "w"
+    encoding = None if binary else "utf-8"
+
+    try:
+        with os.fdopen(fd, mode, encoding=encoding) as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 class StorageList(list):
     """subclassed list that handles storage of data. supports a variety of storage formats."""
@@ -18,6 +47,7 @@ class StorageList(list):
         self.path = core.get_path(os.path.join(path, name))
         self.name = os.path.basename(self.path)
         self.binary = False
+        self._lock = threading.RLock()
 
         # lets not overwrite a builtin
         file_type = type
@@ -57,8 +87,8 @@ class StorageList(list):
             write_mode = "wb" if self.binary else "w"
             encoding = "utf-8" if not self.binary else None
 
-            with open(self.path, write_mode, encoding=encoding) as f:
-                f.write(content)
+            with self._lock:
+                _atomic_write(self.path, content, binary=self.binary)
         except Exception as e:
             core.log("error", f"error writing {self.name}: {e}")
             return False
@@ -134,6 +164,7 @@ class StorageDict(dict):
         self.name = os.path.basename(self.path)
         self.binary = False
         self.autoreload = autoreload
+        self._lock = threading.RLock()
 
         # lets not overwrite a builtin
         file_type = type
@@ -174,8 +205,8 @@ class StorageDict(dict):
         try:
             write_mode = "wb" if self.binary else "w"
             encoding = "utf-8" if not self.binary else None
-            with open(self.path, write_mode, encoding=encoding) as f:
-                f.write(content)
+            with self._lock:
+                _atomic_write(self.path, content, binary=self.binary)
         except Exception as e:
             core.log("error", f"error writing {self.name}: {e}")
             return False
@@ -244,8 +275,8 @@ class StorageDict(dict):
                     if not os.path.exists(file_dir):
                         os.makedirs(file_dir, exist_ok=True)
 
-                    with open(name, "w", encoding="utf-8") as f:
-                        f.write(content)
+                    with self._lock:
+                        _atomic_write(name, content, binary=False)
 
                 # remove files that were deleted
                 for root, dirs, files in os.walk(self.path, topdown=False):
@@ -325,6 +356,7 @@ class StorageText:
 
         self._data = ""
         self.autoreload = autoreload
+        self._lock = threading.RLock()
 
         if os.path.exists(self.path):
             if autoload and not TEMPORARY:
@@ -355,7 +387,7 @@ class StorageText:
         if TEMPORARY:
             return self
 
-        with open(self.path, "w", encoding="utf-8") as f:
-            f.write(self._data)
+        with self._lock:
+            _atomic_write(self.path, self._data, binary=False)
 
         return self

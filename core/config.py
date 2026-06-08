@@ -37,6 +37,13 @@ default_config = {
         "reasoning_effort": None,
         "use_tools": True
     },
+    "tools": {
+        "legacy_auto_tools": True,
+        "max_recursion": 4,
+        "max_calls_per_turn": 12,
+        "max_repeated_calls": 2,
+        "timeout_seconds": 30
+    },
     "channels": {
         "enabled": [],
         "disabled": [],

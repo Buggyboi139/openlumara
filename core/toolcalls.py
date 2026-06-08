@@ -1,6 +1,7 @@
 import core
 import json
 import json_repair
+import asyncio
 
 class ToolcallManager:
     def __init__(self, channel):
@@ -94,7 +95,7 @@ class ToolcallManager:
 
         return toolcall_request
 
-    async def process(self, assistant_message, push=False, recursion_counter=0):
+    async def process(self, assistant_message, push=False, recursion_counter=0, call_state=None):
         """
         process tool calls from an API response..
         assistant_content is the "normal" non-toolcall content, the text that the AI wants to say that's not toolcalls
@@ -113,6 +114,39 @@ class ToolcallManager:
 
         repaired_tool_calls = self._repair_tool_calls(assistant_message["tool_calls"])
 
+        tool_config = core.config.get("tools", {}) or {}
+
+        def _safe_int(value, default, minimum=1):
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, value)
+
+        def _safe_float(value, default, minimum=0.1):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, value)
+
+        max_recursion = _safe_int(tool_config.get("max_recursion", 4), 4)
+        max_calls = _safe_int(tool_config.get("max_calls_per_turn", 12), 12)
+        max_repeated = _safe_int(tool_config.get("max_repeated_calls", 2), 2)
+        default_timeout = _safe_float(tool_config.get("timeout_seconds", 30), 30)
+
+        if call_state is None:
+            call_state = {"total": 0, "seen": {}}
+
+        async def reject_tool_call(tool_call_dict, message):
+            rejected_msg = json.dumps({"content": message, "status": "error"})
+            await self.channel.context.chat.add({
+                "role": "tool",
+                "tool_call_id": tool_call_dict.get('id'),
+                "content": rejected_msg
+            })
+            return {"type": "tool", "tool_call_id": tool_call_dict.get('id'), "content": rejected_msg}
+
         # add it to context
         await self.channel.context.chat.add(assistant_message)
 
@@ -120,10 +154,27 @@ class ToolcallManager:
         if push:
             await self.channel.push(assistant_message)
 
+        if recursion_counter >= max_recursion:
+            for tool_call_dict in repaired_tool_calls:
+                yield await reject_tool_call(tool_call_dict, f"Tool recursion limit reached ({max_recursion}).")
+            return
+
         # execute each tool and add their responses
         for tool_call_dict in repaired_tool_calls:
             tool_name = tool_call_dict['function']['name']
             tool_args = json_repair.loads(tool_call_dict['function']['arguments'])
+
+            call_state["total"] += 1
+            if call_state["total"] > max_calls:
+                yield await reject_tool_call(tool_call_dict, f"Tool call limit reached ({max_calls}) for this turn.")
+                continue
+
+            call_signature = f"{tool_name}:{tool_call_dict['function']['arguments']}"
+            seen_count = call_state["seen"].get(call_signature, 0) + 1
+            call_state["seen"][call_signature] = seen_count
+            if seen_count > max_repeated:
+                yield await reject_tool_call(tool_call_dict, f"Repeated identical tool call blocked after {max_repeated} attempts.")
+                continue
 
             module_instance = None
             module_instance_display_name = None
@@ -164,8 +215,14 @@ class ToolcallManager:
                 core.log("toolcall", tool_call_str)
 
                 try:
-                    # do the function call and get it's result
-                    func_response = await func_callable(**tool_args)
+                    metadata = getattr(self.channel.manager, "tool_metadata", {}).get(tool_name, {})
+                    timeout = metadata.get("timeout") or default_timeout
+
+                    # do the function call and get its result
+                    try:
+                        func_response = await asyncio.wait_for(func_callable(**tool_args), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(f"Tool timed out after {timeout} seconds")
 
                     # don't double-escape strings
                     if isinstance(func_response, str):
@@ -258,7 +315,8 @@ class ToolcallManager:
 
                     async for sub_token in self.process(
                         toolcall_request,
-                        recursion_counter=recursion_counter,
+                        recursion_counter=recursion_counter + 1,
+                        call_state=call_state,
                         push=push
                     ):
                         if self.channel.manager.API.cancel_request:

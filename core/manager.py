@@ -22,6 +22,7 @@ class Manager:
         self.modules = {}
         self.tools = []
         self.tool_names = []
+        self.tool_metadata = {}
         self.pure_mode = False
         self.coding_mode = False
 
@@ -506,6 +507,9 @@ class Manager:
 
         loaded_module = module(self, is_user_module)
 
+        tool_config = core.config.get("tools", {}) or {}
+        legacy_auto_tools = bool(tool_config.get("legacy_auto_tools", True))
+
         if self.pure_mode:
             return loaded_module
 
@@ -531,6 +535,10 @@ class Manager:
 
             if getattr(func_obj, "_is_command", False):
                 # decorated command in a module
+                continue
+
+            is_explicit_tool = bool(getattr(func_obj, "_is_tool", False))
+            if not legacy_auto_tools and not is_explicit_tool:
                 continue
 
             # if there's a docstring, make sure to pass that on to the LLM
@@ -579,10 +587,11 @@ class Manager:
                     func_params_translated[param_name]["description"] = func_param_desc
 
             # build toolcall object
+            tool_name = f"{loaded_module.name}_{func_name}"
             tool = {
                 "type": "function",
                 "function": {
-                    "name": f"{loaded_module.name}_{func_name}",
+                    "name": tool_name,
                     "parameters": {
                         "type": "object",
                         "properties": func_params_translated,
@@ -598,5 +607,13 @@ class Manager:
                 tool["function"]["description"] = docstring
 
             self.tools.append(tool)
+
+            self.tool_metadata[tool_name] = {
+                "module": loaded_module.name,
+                "method": func_name,
+                "risk": getattr(func_obj, "_tool_risk", "read"),
+                "timeout": getattr(func_obj, "_tool_timeout", None),
+                "explicit": is_explicit_tool,
+            }
 
         return loaded_module

@@ -6,6 +6,7 @@ removing the need for threading workarounds and Flask-SocketIO.
 """
 
 import os
+import shutil
 import asyncio
 import json
 import uuid
@@ -13,6 +14,7 @@ import base64
 import secrets
 import time
 import copy
+import hmac
 from datetime import datetime
 from collections import defaultdict
 from typing import List, Set, Dict, Any, Optional
@@ -110,6 +112,27 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+def webui_login_required() -> bool:
+    """Return the effective login requirement, including internet-mode safety."""
+    if not channel_instance:
+        return False
+    if bool(channel_instance.config.get("require_login")):
+        return True
+    network_mode = channel_instance.config.get("network_mode")
+    allow_unsafe = bool(channel_instance.config.get("allow_unsafe_no_auth_internet"))
+    return network_mode == "internet" and not allow_unsafe
+
+def webui_default_credentials_blocked() -> bool:
+    if not channel_instance:
+        return False
+    if not bool(channel_instance.config.get("block_default_admin_credentials", True)):
+        return False
+    webui_config = core.config.get("channels", {}).get("settings", {}).get("webui", {})
+    return (
+        str(webui_config.get("username", "")) == "admin"
+        and str(webui_config.get("password", "")) == "admin"
+    )
+
 async def authenticate_websocket(websocket: WebSocket) -> Optional[str]:
     """
     Authenticate WebSocket connection using token or session.
@@ -119,7 +142,7 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[str]:
         return None
 
     # If login not required, allow anonymous
-    if not bool(channel_instance.config.get("require_login")):
+    if not webui_login_required():
         return "anonymous"
 
     # Method 1: Parse session cookie manually
@@ -224,6 +247,44 @@ def serialize_for_json(obj):
     else:
         return str(obj)
 
+def backup_existing_file(full_path: str, reason: str = "manual"):
+    """Create a timestamped backup copy under data/_backups before mutation."""
+    if not full_path or not os.path.exists(full_path) or not os.path.isfile(full_path):
+        return None
+
+    backup_root = os.path.join(core.get_data_path(), "_backups", reason)
+    os.makedirs(backup_root, exist_ok=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    basename = os.path.basename(full_path)
+    backup_path = os.path.join(backup_root, f"{basename}.{timestamp}.bak")
+
+    counter = 1
+    while os.path.exists(backup_path):
+        backup_path = os.path.join(backup_root, f"{basename}.{timestamp}.{counter}.bak")
+        counter += 1
+
+    shutil.copy2(full_path, backup_path)
+    return backup_path
+
+def resolve_storage_path(file_path: str, data_dir: str = None) -> str:
+    """Resolve a WebUI storage path and enforce that it stays inside data_dir."""
+    if not file_path or os.path.isabs(str(file_path)):
+        raise HTTPException(status_code=400, detail="Invalid storage path")
+
+    base_dir = os.path.abspath(data_dir or core.get_data_path())
+    full_path = os.path.abspath(os.path.join(base_dir, str(file_path)))
+
+    try:
+        common = os.path.commonpath([base_dir, full_path])
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if common != base_dir:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return full_path
+
 # -----------------------------------------------------------------------------
 # Security & Auth Middleware
 # -----------------------------------------------------------------------------
@@ -253,7 +314,7 @@ async def add_security_headers(request: Request, call_next):
     return response
 
 async def get_current_user(request: Request):
-    if not channel_instance or not bool(channel_instance.config.get("require_login")):
+    if not channel_instance or not webui_login_required():
         return "user"
 
     # Check Session
@@ -293,7 +354,7 @@ async def require_login_middleware(request: Request, call_next):
     if not channel_instance:
         return JSONResponse({'error': "Channel object not found"}, status_code=500)
 
-    if not bool(channel_instance.config.get("require_login")):
+    if not webui_login_required():
         # Auto-logout if auth turned off
         if 'username' in request.session:
             request.session.pop('username', None)
@@ -333,15 +394,16 @@ async def require_login_middleware(request: Request, call_next):
 
 @app.get("/login")
 async def login_page(request: Request):
-    if not channel_instance or not bool(channel_instance.config.get("username")):
+    if not channel_instance or not webui_login_required():
         return RedirectResponse(url='/')
-    return templates.TemplateResponse(request, "login.html", {"request": request, "error": None})
+    error = "Default admin/admin credentials are blocked. Change the WebUI username/password in config.yaml." if webui_default_credentials_blocked() else None
+    return templates.TemplateResponse(request, "login.html", {"request": request, "error": error})
 
 @app.post("/login")
 async def login_post(request: Request):
     global channel_instance
 
-    if not channel_instance or not bool(channel_instance.config.get("username")):
+    if not channel_instance or not webui_login_required():
         return RedirectResponse(url='/')
 
     form = await request.form()
@@ -361,7 +423,13 @@ async def login_post(request: Request):
     expected_username = webui_config.get("username")
     expected_password = webui_config.get("password")
 
-    if expected_username and expected_password and username == expected_username and password == expected_password:
+    if webui_default_credentials_blocked():
+        return templates.TemplateResponse(request, "login.html", {
+            "request": request,
+            "error": "Default admin/admin credentials are blocked. Change the WebUI username/password in config.yaml."
+        })
+
+    if expected_username and expected_password and hmac.compare_digest(str(username), str(expected_username)) and hmac.compare_digest(str(password), str(expected_password)):
         request.session['username'] = username
         FAILED_ATTEMPTS.pop(ip_address, None)
         return RedirectResponse(url='/', status_code=303)
@@ -375,18 +443,30 @@ async def api_login(request: Request):
     username = data.get('username')
     password = data.get('password')
 
+    ip_address = request.client.host if request.client else "unknown"
+    now = time.time()
+    attempts = FAILED_ATTEMPTS[ip_address]
+    attempts[:] = [t for t in attempts if now - t < RATE_LIMIT_WINDOW]
+    if len(attempts) >= MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please try again later.")
+
     webui_config = core.config.get("channels", {}).get("settings", {}).get("webui", {})
     expected_username = webui_config.get("username")
     expected_password = webui_config.get("password")
 
+    if webui_default_credentials_blocked():
+        raise HTTPException(status_code=403, detail="Default admin/admin credentials are blocked. Change the WebUI username/password in config.yaml.")
+
     if not expected_username or not expected_password:
         raise HTTPException(status_code=500, detail='Authentication not configured on server')
 
-    if username == expected_username and password == expected_password:
+    if hmac.compare_digest(str(username), str(expected_username)) and hmac.compare_digest(str(password), str(expected_password)):
         token = secrets.token_urlsafe(32)
         ACTIVE_TOKENS.add(token)
+        FAILED_ATTEMPTS.pop(ip_address, None)
         return {'token': token}
     else:
+        FAILED_ATTEMPTS[ip_address].append(now)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
 @app.get("/logout")
@@ -419,7 +499,7 @@ async def index(request: Request):
             "request": request,
             "js_files": JS_FILES,
             "css_files": CSS_FILES,
-            "require_login": bool(channel_instance.config.get("require_login"))
+            "require_login": webui_login_required()
         }
     )
 
@@ -1044,6 +1124,10 @@ async def load_settings(user: str = Depends(require_auth)):
 @app.post("/settings/save")
 async def save_settings(request: Request, user: str = Depends(require_auth)):
     form_data = await request.json()
+    config_path = getattr(core.config.config, "path", None)
+    if config_path:
+        backup_existing_file(config_path, "settings")
+
     result = core.config.config.load(data=form_data)
     core.config.config.save()
 
@@ -1124,14 +1208,10 @@ async def list_storage_files(user: str = Depends(require_auth)):
 async def load_storage_file(file: str, user: str = Depends(require_auth)):
     """Load a specific storage file."""
     data_dir = core.get_data_path()
-    full_path = os.path.join(data_dir, file)
+    full_path = resolve_storage_path(file, data_dir)
 
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="File not found")
-
-    # Security check - prevent path traversal
-    if not os.path.abspath(full_path).startswith(os.path.abspath(data_dir)):
-        raise HTTPException(status_code=403, detail="Access denied")
 
     ext = os.path.splitext(file)[1].lower()
 
@@ -1184,15 +1264,13 @@ async def save_storage_file(request: Request, user: str = Depends(require_auth))
         raise HTTPException(status_code=400, detail="No file specified")
 
     data_dir = core.get_data_path()
-    full_path = os.path.join(data_dir, file_path)
-
-    # Security check - prevent path traversal
-    if not os.path.abspath(full_path).startswith(os.path.abspath(data_dir)):
-        raise HTTPException(status_code=403, detail="Access denied")
+    full_path = resolve_storage_path(file_path, data_dir)
 
     ext = os.path.splitext(file_path)[1].lower()
 
     try:
+        backup_existing_file(full_path, "storage")
+
         if storage_type == 'dict':
             data_to_save = content
             if ext == '.json':
@@ -1250,15 +1328,13 @@ async def delete_storage_key(request: Request, user: str = Depends(require_auth)
         raise HTTPException(status_code=400, detail="Missing file or key")
 
     data_dir = core.get_data_path()
-    full_path = os.path.join(data_dir, file_path)
-
-    # Security check - prevent path traversal
-    if not os.path.abspath(full_path).startswith(os.path.abspath(data_dir)):
-        raise HTTPException(status_code=403, detail="Access denied")
+    full_path = resolve_storage_path(file_path, data_dir)
 
     ext = os.path.splitext(file_path)[1].lower()
 
     try:
+        backup_existing_file(full_path, "storage")
+
         if ext == '.json':
             with open(full_path, 'r', encoding='utf-8') as f:
                 file_data = json.load(f)
@@ -1311,15 +1387,13 @@ async def add_storage_key(request: Request, user: str = Depends(require_auth)):
         raise HTTPException(status_code=400, detail="Missing file or key")
 
     data_dir = core.get_data_path()
-    full_path = os.path.join(data_dir, file_path)
-
-    # Security check - prevent path traversal
-    if not os.path.abspath(full_path).startswith(os.path.abspath(data_dir)):
-        raise HTTPException(status_code=403, detail="Access denied")
+    full_path = resolve_storage_path(file_path, data_dir)
 
     ext = os.path.splitext(file_path)[1].lower()
 
     try:
+        backup_existing_file(full_path, "storage")
+
         if ext == '.json':
             with open(full_path, 'r', encoding='utf-8') as f:
                 file_data = json.load(f)
@@ -1433,6 +1507,14 @@ class Webui(core.channel.Channel):
         "require_login": {
             "description": "Whether to protect the WebUI with a username and password. **Highly recommended if your webui is exposed to the internet!!**",
             "default": False
+        },
+        "allow_unsafe_no_auth_internet": {
+            "description": "Allow internet network mode without login. Unsafe unless protected by another layer.",
+            "default": False
+        },
+        "block_default_admin_credentials": {
+            "description": "Block login when username and password are still admin/admin.",
+            "default": True
         },
         "username": "admin",
         "password": "admin"

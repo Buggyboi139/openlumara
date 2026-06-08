@@ -43,13 +43,21 @@ class Chat:
         # chat autoresume
         if os.path.exists(self.current_save_path) and core.config.get("core", {}).get("auto_resume_chats"):
             try:
-                with open(self.current_save_path, "r") as f:
-                    target_index = int(f.read())
+                with open(self.current_save_path, "r", encoding="utf-8") as f:
+                    raw_index = f.read().strip()
 
-                if target_index < len(self.data):
+                if not raw_index or raw_index.lower() == "none":
+                    raise ValueError("current chat pointer is empty")
+
+                target_index = int(raw_index)
+
+                if 0 <= target_index < len(self.data):
                     self.current = target_index
+                else:
+                    self._set_current(None)
             except Exception as e:
                 core.log_error("couldn't autoresume chat", e)
+                self._set_current(None)
 
     def _is_command_only(self, messages):
         """Check if a messages array contains only user commands and command responses"""
@@ -79,8 +87,18 @@ class Chat:
 
     def _set_current(self, index: int):
         self.current = index
+
+        if index is None:
+            try:
+                os.remove(self.current_save_path)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                core.log_error("couldn't clear current chat pointer", e)
+            return
+
         # store current index into a simple file
-        with open(self.current_save_path, "w") as f:
+        with open(self.current_save_path, "w", encoding="utf-8") as f:
             f.write(str(index))
 
     def _find_index(self, id: str):
@@ -142,9 +160,9 @@ class Chat:
         if self.current == index:
             # Deleted the current chat - reset or move to previous
             self._set_current(min(index, len(self.data) - 1) if self.data else None)
-        elif self.current > index:
+        elif self.current is not None and self.current > index:
             # Current was after deleted item, shift down
-            self.current -= 1
+            self._set_current(self.current - 1)
 
         return self.current
 
@@ -282,20 +300,16 @@ class Chat:
         # make a copy so we don't modify the original reference
         new_message = message.copy()
 
-        # ensure message does not exceed token limits
+        # ensure a single new message does not exceed token limits
         max_tokens = int(core.config.get("api").get("max_context", 8192))
-        
-        # create a potential new message list to check token count
-        current_messages = self.data[self.current].get("messages", [])
-        potential_messages = list(current_messages)
 
-        potential_messages.append(new_message)
-        
-        # calculate tokens for this potential list
-        new_token_count = await self.count_tokens(messages=potential_messages)
+        # Full-history context trimming is handled by Context.get(). Rejecting the
+        # raw saved history here prevents long chats from continuing even when
+        # old turns can be trimmed safely.
+        new_token_count = await self.count_tokens(messages=[new_message])
 
         if new_token_count > max_tokens:
-            await self.channel.push(f"Your request exceeds the token limit! It was {new_token_count} out of {max_tokens} tokens.")
+            await self.channel.push(f"Your message exceeds the token limit! It was {new_token_count} out of {max_tokens} tokens.")
             return False
 
         if not self.data[self.current]["title"].strip():
