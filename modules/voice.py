@@ -32,7 +32,13 @@ class Voice(core.module.Module):
         "stt": {
             "provider": {
                 "default": "whisper_cpp",
-                "description": "Speech-to-text provider: whisper_cpp, faster_whisper, or disabled."
+                "type": "select",
+                "options": {
+                    "whisper_cpp": "Use the local whisper.cpp executable. Best current default for this project.",
+                    "faster_whisper": "Use faster-whisper from Python. Useful if installed and tuned for your hardware.",
+                    "disabled": "Disable speech-to-text. Voice notes will not be transcribed."
+                },
+                "description": "Speech-to-text backend."
             },
             "ffmpeg_path": {
                 "default": "ffmpeg",
@@ -48,6 +54,22 @@ class Voice(core.module.Module):
             },
             "language": {
                 "default": "en",
+                "type": "select",
+                "options": {
+                    "auto": "Auto-detect language when supported by the selected STT provider.",
+                    "en": "English.",
+                    "es": "Spanish.",
+                    "fr": "French.",
+                    "de": "German.",
+                    "it": "Italian.",
+                    "pt": "Portuguese.",
+                    "nl": "Dutch.",
+                    "pl": "Polish.",
+                    "ru": "Russian.",
+                    "ja": "Japanese.",
+                    "ko": "Korean.",
+                    "zh": "Chinese."
+                },
                 "description": "Language code for speech recognition."
             },
             "threads": {
@@ -56,15 +78,38 @@ class Voice(core.module.Module):
             },
             "faster_whisper_model": {
                 "default": "small.en",
+                "type": "select",
+                "options": {
+                    "tiny.en": "Fastest English-only model. Least accurate.",
+                    "base.en": "Fast English-only model. Good for clear Telegram voice notes.",
+                    "small.en": "Better English accuracy. Slower than base.",
+                    "medium.en": "High English accuracy. Much slower on CPU.",
+                    "large-v3-turbo": "Large turbo multilingual model. Heavier, better accuracy.",
+                    "distil-large-v3": "Distilled large model if installed or downloadable. Good speed/accuracy tradeoff."
+                },
                 "description": "Model name or path for faster-whisper."
             },
             "faster_whisper_device": {
                 "default": "cpu",
-                "description": "Device for faster-whisper: cpu or cuda. AMD users should usually leave this on cpu."
+                "type": "select",
+                "options": {
+                    "cpu": "CPU inference. Safest option, especially on AMD systems.",
+                    "cuda": "NVIDIA CUDA GPU inference. Usually not useful on AMD without special setup.",
+                    "auto": "Let faster-whisper/CTranslate2 choose when supported. May still make dumb choices."
+                },
+                "description": "Device for faster-whisper. AMD users should usually leave this on cpu."
             },
             "faster_whisper_compute_type": {
                 "default": "int8",
-                "description": "Compute type for faster-whisper, such as int8 or float16."
+                "type": "select",
+                "options": {
+                    "int8": "Best CPU default. Lower memory and usually fastest on CPU.",
+                    "int8_float16": "Good GPU mixed mode when supported. Not the CPU default.",
+                    "int8_float32": "Mixed mode for some CPU/GPU setups. Try only if int8 misbehaves.",
+                    "float16": "GPU-oriented half precision. Usually bad on CPU.",
+                    "float32": "Most compatible full precision. Slowest and heaviest."
+                },
+                "description": "Compute type for faster-whisper."
             },
             "max_audio_seconds": {
                 "default": 180,
@@ -74,7 +119,14 @@ class Voice(core.module.Module):
         "tts": {
             "provider": {
                 "default": "kokoro_onnx",
-                "description": "Text-to-speech provider: kokoro_onnx, chatterbox, chatterbox_turbo, or disabled."
+                "type": "select",
+                "options": {
+                    "kokoro_onnx": "Kokoro ONNX. Fast, local, lightweight, slightly synthetic.",
+                    "chatterbox": "Chatterbox TTS. More natural and expressive, heavier than Kokoro.",
+                    "chatterbox_turbo": "Chatterbox Turbo when available. Requires a reference voice prompt path in this module.",
+                    "disabled": "Disable text-to-speech. Telegram will only send text."
+                },
+                "description": "Text-to-speech backend."
             },
             "model_path": {
                 "default": "models/kokoro/kokoro-v1.0.onnx",
@@ -86,14 +138,61 @@ class Voice(core.module.Module):
             },
             "voice": {
                 "default": "af_heart",
-                "description": "Kokoro voice name."
+                "type": "select",
+                "options": {
+                    "af_heart": "American female. Warm default voice.",
+                    "af_alloy": "American female. Balanced and clear.",
+                    "af_aoede": "American female. Softer expressive voice.",
+                    "af_bella": "American female. Polished and smooth.",
+                    "af_jessica": "American female. Bright conversational voice.",
+                    "af_kore": "American female. Clean assistant-like voice.",
+                    "af_nicole": "American female. Calm and natural.",
+                    "af_nova": "American female. Clear modern voice.",
+                    "af_river": "American female. Relaxed conversational voice.",
+                    "af_sarah": "American female. Friendly everyday voice.",
+                    "af_sky": "American female. Light and clear.",
+                    "am_adam": "American male. Strong and confident.",
+                    "am_echo": "American male. Clear and resonant.",
+                    "am_eric": "American male. Professional assistant style.",
+                    "am_fenrir": "American male. Deeper and more dramatic.",
+                    "am_liam": "American male. Casual conversational voice.",
+                    "am_michael": "American male. Warm and balanced. Good first male pick.",
+                    "am_onyx": "American male. Richer and deeper.",
+                    "am_puck": "American male. More playful and animated.",
+                    "bf_alice": "British female. Clear British voice.",
+                    "bf_emma": "British female. Smooth British voice.",
+                    "bf_isabella": "British female. Polished British voice.",
+                    "bf_lily": "British female. Light British voice.",
+                    "bm_daniel": "British male. Clear and formal.",
+                    "bm_fable": "British male. Narrative/storytelling tone.",
+                    "bm_george": "British male. Authoritative and steady.",
+                    "bm_lewis": "British male. Conversational British voice.",
+                    "ef_dora": "Spanish female voice when supported by your Kokoro voices file.",
+                    "em_alex": "Spanish male voice when supported by your Kokoro voices file.",
+                    "em_santa": "Spanish male voice when supported by your Kokoro voices file.",
+                    "ff_siwis": "French female voice when supported by your Kokoro voices file."
+                },
+                "description": "Kokoro voice name. Chatterbox ignores this and uses its default or reference prompt."
             },
             "language": {
                 "default": "en-us",
-                "description": "Kokoro language/accent code when supported by the installed version."
+                "type": "select",
+                "options": {
+                    "en-us": "American English. Best for af_* and am_* voices.",
+                    "en-gb": "British English. Best for bf_* and bm_* voices.",
+                    "es": "Spanish when supported by the selected Kokoro voice/model.",
+                    "fr-fr": "French when supported by the selected Kokoro voice/model.",
+                    "ja": "Japanese when supported by the selected Kokoro voice/model.",
+                    "zh": "Chinese when supported by the selected Kokoro voice/model."
+                },
+                "description": "Kokoro language/accent code when supported by the installed version. Chatterbox ignores this."
             },
             "speed": {
                 "default": 1.0,
+                "type": "slider",
+                "min": 0.7,
+                "max": 1.3,
+                "step": 0.01,
                 "description": "Speech speed multiplier for Kokoro. Chatterbox ignores this."
             },
             "ffmpeg_path": {
@@ -102,11 +201,25 @@ class Voice(core.module.Module):
             },
             "opus_bitrate": {
                 "default": "32k",
+                "type": "select",
+                "options": {
+                    "24k": "Smaller Telegram voice files. Slightly lower quality.",
+                    "32k": "Good default for Telegram voice notes.",
+                    "48k": "Higher quality. Larger files.",
+                    "64k": "High quality. Usually unnecessary for voice replies."
+                },
                 "description": "Bitrate for Telegram voice replies."
             },
             "chatterbox_device": {
                 "default": "cpu",
-                "description": "Device for Chatterbox: cpu, cuda, mps, or auto. AMD users should usually start with cpu."
+                "type": "select",
+                "options": {
+                    "cpu": "CPU inference. Safest default and best for your current AMD setup.",
+                    "cuda": "NVIDIA CUDA GPU inference. Requires CUDA-capable PyTorch.",
+                    "mps": "Apple Silicon Metal backend.",
+                    "auto": "Try CUDA, then MPS, then CPU. Convenient, but computers lie."
+                },
+                "description": "Device for Chatterbox. AMD users should usually start with cpu."
             },
             "chatterbox_voice_prompt_path": {
                 "default": "",
@@ -114,14 +227,26 @@ class Voice(core.module.Module):
             },
             "chatterbox_exaggeration": {
                 "default": 0.5,
+                "type": "slider",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.01,
                 "description": "Chatterbox emotion intensity. Try 0.35 to 0.7 before getting theatrical."
             },
             "chatterbox_cfg_weight": {
                 "default": 0.5,
+                "type": "slider",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.01,
                 "description": "Chatterbox pacing/control weight. Lower can be faster; higher can be more deliberate."
             },
             "chatterbox_temperature": {
                 "default": 0.8,
+                "type": "slider",
+                "min": 0.1,
+                "max": 1.5,
+                "step": 0.01,
                 "description": "Chatterbox sampling temperature. Lower is more consistent, higher is more varied."
             }
         },
