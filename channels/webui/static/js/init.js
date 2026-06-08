@@ -149,6 +149,13 @@ function initSettingsModuleSubnav() {
         });
     };
 
+    const setVisibleSublist = (category = null) => {
+        document.querySelectorAll('.settings-nav-sublist').forEach(list => {
+            const visible = list.dataset.parentCategory === category;
+            list.classList.toggle('visible', visible);
+        });
+    };
+
     const showModuleLanding = (category) => {
         if (!moduleCategories.has(category)) return;
 
@@ -175,6 +182,7 @@ function initSettingsModuleSubnav() {
             });
         }
 
+        setVisibleSublist(category);
         setSubnavActive(category, null);
     };
 
@@ -205,6 +213,7 @@ function initSettingsModuleSubnav() {
             group.dataset.moduleSubnavManaged = 'true';
         });
 
+        setVisibleSublist(category);
         setSubnavActive(category, groupKey);
     };
 
@@ -247,6 +256,9 @@ function initSettingsModuleSubnav() {
 
             parentBtn.insertAdjacentElement('afterend', sublist);
         });
+
+        const activeParent = nav.querySelector('.settings-nav-item.active')?.dataset.category || null;
+        setVisibleSublist(moduleCategories.has(activeParent) ? activeParent : null);
     };
 
     if (typeof renderSettingsNav === 'function' && !renderSettingsNav.__moduleSubnavWrapped) {
@@ -263,6 +275,8 @@ function initSettingsModuleSubnav() {
         renderSettingsForm = function wrappedRenderSettingsForm(categories) {
             originalRenderSettingsForm(categories);
             moduleCategories.forEach(showModuleLanding);
+            const activeCategory = document.querySelector('.settings-nav-item.active')?.dataset.category || null;
+            setVisibleSublist(moduleCategories.has(activeCategory) ? activeCategory : null);
         };
         renderSettingsForm.__moduleSubnavWrapped = true;
     }
@@ -274,6 +288,7 @@ function initSettingsModuleSubnav() {
             if (moduleCategories.has(category)) {
                 showModuleLanding(category);
             } else {
+                setVisibleSublist(null);
                 setSubnavActive(null, null);
             }
         };
