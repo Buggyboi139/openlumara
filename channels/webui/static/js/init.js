@@ -132,10 +132,153 @@ function initSettingsGroupCollapse() {
         if (!header || !form.contains(header)) return;
 
         const group = header.closest('.settings-group');
-        if (!group) return;
+        if (!group || group.dataset.moduleSubnavManaged === 'true') return;
 
         group.classList.toggle('is-open');
     });
+}
+
+function initSettingsModuleSubnav() {
+    const moduleCategories = new Set(['modules', 'user_modules']);
+
+    const getSection = (category) => document.querySelector(`.settings-section[data-category="${category}"]`);
+
+    const setSubnavActive = (category, groupKey = null) => {
+        document.querySelectorAll('.settings-nav-subitem').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.category === category && btn.dataset.group === groupKey);
+        });
+    };
+
+    const showModuleLanding = (category) => {
+        if (!moduleCategories.has(category)) return;
+
+        const section = getSection(category);
+        if (!section) return;
+
+        const itemsContainer = section.querySelector('.settings-items');
+        const groupsGrid = section.querySelector('.settings-groups-grid');
+
+        if (itemsContainer) {
+            Array.from(itemsContainer.children).forEach(child => {
+                if (!child.classList.contains('settings-groups-grid')) {
+                    child.style.display = '';
+                }
+            });
+        }
+
+        if (groupsGrid) {
+            groupsGrid.style.display = 'none';
+            groupsGrid.querySelectorAll('.settings-group').forEach(group => {
+                group.style.display = 'none';
+                group.classList.remove('is-open');
+                group.dataset.moduleSubnavManaged = 'true';
+            });
+        }
+
+        setSubnavActive(category, null);
+    };
+
+    const showModuleSettingsGroup = (category, groupKey) => {
+        const section = getSection(category);
+        if (!section) return;
+
+        if (typeof switchSettingsCategory === 'function') {
+            switchSettingsCategory(category);
+        }
+
+        const itemsContainer = section.querySelector('.settings-items');
+        const groupsGrid = section.querySelector('.settings-groups-grid');
+        if (!itemsContainer || !groupsGrid) return;
+
+        Array.from(itemsContainer.children).forEach(child => {
+            if (!child.classList.contains('settings-groups-grid')) {
+                child.style.display = 'none';
+            }
+        });
+
+        groupsGrid.style.display = 'block';
+
+        groupsGrid.querySelectorAll('.settings-group').forEach(group => {
+            const isTarget = group.dataset.group === groupKey;
+            group.style.display = isTarget ? 'block' : 'none';
+            group.classList.toggle('is-open', isTarget);
+            group.dataset.moduleSubnavManaged = 'true';
+        });
+
+        setSubnavActive(category, groupKey);
+    };
+
+    const buildModuleSubnav = (categories) => {
+        const nav = document.getElementById('settings-nav');
+        if (!nav || !categories) return;
+
+        nav.querySelectorAll('.settings-nav-sublist').forEach(el => el.remove());
+
+        moduleCategories.forEach(category => {
+            const categoryData = categories[category];
+            const groups = categoryData?.groups;
+            const parentBtn = nav.querySelector(`.settings-nav-item[data-category="${category}"]`);
+            if (!parentBtn || !groups || typeof groups.entries !== 'function') return;
+
+            const moduleGroups = Array.from(groups.entries())
+                .filter(([groupKey]) => groupKey.startsWith(`${category}.settings.`))
+                .sort((a, b) => (a[1].title || '').localeCompare(b[1].title || ''));
+
+            if (moduleGroups.length === 0) return;
+
+            const sublist = document.createElement('div');
+            sublist.className = 'settings-nav-sublist';
+            sublist.dataset.parentCategory = category;
+
+            moduleGroups.forEach(([groupKey, groupData]) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'settings-nav-subitem';
+                btn.dataset.category = category;
+                btn.dataset.group = groupKey;
+                btn.textContent = groupData.title || groupKey.split('.').pop();
+                btn.onclick = (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    showModuleSettingsGroup(category, groupKey);
+                };
+                sublist.appendChild(btn);
+            });
+
+            parentBtn.insertAdjacentElement('afterend', sublist);
+        });
+    };
+
+    if (typeof renderSettingsNav === 'function' && !renderSettingsNav.__moduleSubnavWrapped) {
+        const originalRenderSettingsNav = renderSettingsNav;
+        renderSettingsNav = function wrappedRenderSettingsNav(categories) {
+            originalRenderSettingsNav(categories);
+            buildModuleSubnav(categories);
+        };
+        renderSettingsNav.__moduleSubnavWrapped = true;
+    }
+
+    if (typeof renderSettingsForm === 'function' && !renderSettingsForm.__moduleSubnavWrapped) {
+        const originalRenderSettingsForm = renderSettingsForm;
+        renderSettingsForm = function wrappedRenderSettingsForm(categories) {
+            originalRenderSettingsForm(categories);
+            moduleCategories.forEach(showModuleLanding);
+        };
+        renderSettingsForm.__moduleSubnavWrapped = true;
+    }
+
+    if (typeof switchSettingsCategory === 'function' && !switchSettingsCategory.__moduleSubnavWrapped) {
+        const originalSwitchSettingsCategory = switchSettingsCategory;
+        switchSettingsCategory = function wrappedSwitchSettingsCategory(category) {
+            originalSwitchSettingsCategory(category);
+            if (moduleCategories.has(category)) {
+                showModuleLanding(category);
+            } else {
+                setSubnavActive(null, null);
+            }
+        };
+        switchSettingsCategory.__moduleSubnavWrapped = true;
+    }
 }
 
 // =============================================================================
@@ -168,6 +311,7 @@ async function init() {
             document.documentElement.style.setProperty('--font-size-base', `${savedFontSize}px`);
         }
 
+        initSettingsModuleSubnav();
         loadTheme();
         loadChats();
         initTagFilterState();
