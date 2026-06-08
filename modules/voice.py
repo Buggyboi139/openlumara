@@ -123,7 +123,7 @@ class Voice(core.module.Module):
                 "options": {
                     "kokoro_onnx": "Kokoro ONNX. Fast, local, lightweight, slightly synthetic.",
                     "chatterbox": "Chatterbox TTS. More natural and expressive, heavier than Kokoro.",
-                    "chatterbox_turbo": "Chatterbox Turbo when available. Requires a reference voice prompt path in this module.",
+                    "chatterbox_turbo": "Chatterbox Turbo. Large download and requires a reference voice prompt path. Falls back to Chatterbox without one.",
                     "disabled": "Disable text-to-speech. Telegram will only send text."
                 },
                 "description": "Text-to-speech backend."
@@ -591,8 +591,11 @@ class Voice(core.module.Module):
         self._chatterbox_turbo = ChatterboxTurboTTS.from_pretrained(device=device)
         return self._chatterbox_turbo
 
+    def _chatterbox_prompt_path(self) -> str:
+        return self._resolve_path(self._cfg("tts", "chatterbox_voice_prompt_path", default="") or "")
+
     def _chatterbox_generate(self, model, text: str, require_prompt: bool = False):
-        prompt_path = self._resolve_path(self._cfg("tts", "chatterbox_voice_prompt_path", default="") or "")
+        prompt_path = self._chatterbox_prompt_path()
         if require_prompt and not prompt_path:
             raise ValueError("chatterbox_turbo requires voice.tts.chatterbox_voice_prompt_path.")
         if prompt_path and not os.path.exists(prompt_path):
@@ -632,6 +635,10 @@ class Voice(core.module.Module):
         text = self._safe_text(text)
         if not text:
             raise ValueError("No text provided for speech synthesis.")
+
+        if turbo and not self._chatterbox_prompt_path():
+            core.log("voice", "chatterbox_turbo selected without a voice prompt; falling back to chatterbox to avoid a large Turbo download.")
+            turbo = False
 
         model = self._get_chatterbox_turbo() if turbo else self._get_chatterbox()
         wav = self._chatterbox_generate(model, text, require_prompt=turbo)
