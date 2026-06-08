@@ -1,0 +1,129 @@
+/* Focused LlamaCalc polish overrides.
+ * This file intentionally uses higher specificity because theme JS and later CSS
+ * also write variables and component styles. Frontend cascade warfare, naturally.
+ */
+
+html body,
+html body *:not(svg):not(path):not(polyline):not(line):not(circle):not(rect) {
+    font-family: 'Plus Jakarta Sans', sans-serif !important;
+}
+
+body .modal,
+body .confirm-modal,
+body .storage-modal,
+body .settings-modal,
+body .category-pane,
+body .chat-pane,
+body header,
+body .modal-header,
+body .chat-title-bar,
+body .sidebar-search,
+body .input-area,
+body .token-usage-container {
+    background-color: rgba(15, 23, 42, 0.34) !important;
+    background-image: linear-gradient(145deg, rgba(255, 255, 255, 0.075), rgba(15, 23, 42, 0.26)) !important;
+    border-color: rgba(255, 255, 255, 0.115) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 24px 70px rgba(0, 0, 0, 0.36) !important;
+    backdrop-filter: blur(32px) saturate(170%) !important;
+    -webkit-backdrop-filter: blur(32px) saturate(170%) !important;
+}
+
+body .settings-modal,
+body .modal,
+body .confirm-modal,
+body .storage-modal {
+    background-color: rgba(15, 23, 42, 0.36) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+}
+
+body .setting-item,
+body .settings-group,
+body .toggle-list,
+body .setting-array,
+body .setting-object,
+body .theme-btn,
+body .setting-collapsible,
+body .chat-item,
+body .category-item,
+body .storage-file-item {
+    background-color: rgba(15, 23, 42, 0.30) !important;
+    background-image: linear-gradient(145deg, rgba(255, 255, 255, 0.07), rgba(15, 23, 42, 0.22)) !important;
+    border-color: rgba(255, 255, 255, 0.10) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.07),
+        0 18px 44px rgba(0, 0, 0, 0.24) !important;
+    backdrop-filter: blur(26px) saturate(155%) !important;
+    -webkit-backdrop-filter: blur(26px) saturate(155%) !important;
+}
+
+body .toggle-list-item {
+    align-self: start !important;
+    background-color: rgba(15, 23, 42, 0.24) !important;
+    background-image: linear-gradient(145deg, rgba(255, 255, 255, 0.055), rgba(15, 23, 42, 0.16)) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+    backdrop-filter: blur(18px) saturate(140%) !important;
+    -webkit-backdrop-filter: blur(18px) saturate(140%) !important;
+}
+
+body .toggle-list-item.enabled,
+body .category-item.active,
+body .chat-item.active,
+body .storage-file-item.active {
+    background-color: rgba(16, 185, 129, 0.14) !important;
+    background-image: linear-gradient(145deg, rgba(52, 211, 153, 0.18), rgba(14, 165, 233, 0.08)) !important;
+    border-color: rgba(52, 211, 153, 0.38) !important;
+}
+
+body .settings-groups-grid {
+    align-items: start !important;
+    grid-auto-rows: min-content !important;
+}
+
+body .settings-group {
+    align-self: start !important;
+    height: auto !important;
+    min-height: 0 !important;
+}
+
+body .settings-group-content {
+    min-height: 0 !important;
+}
+
+body .settings-group:not(.is-open) .settings-group-content {
+    display: none !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    border-top: 0 !important;
+}
+
+body .settings-group.is-open .settings-group-content {
+    display: grid !important;
+    gap: 14px !important;
+}
+
+body .settings-group-header {
+    min-height: 60px;
+}
+
+body input,
+body select,
+body textarea,
+body .setting-input,
+body .setting-select,
+body .model-select,
+body .storage-search,
+body .search-input,
+body .sidebar-search-input,
+body #message {
+    background-color: rgba(15, 23, 42, 0.28) !important;
+    background-image: linear-gradient(145deg, rgba(14, 165, 233, 0.07), rgba(15, 23, 42, 0.26)) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055) !important;
+    backdrop-filter: blur(16px) saturate(140%) !important;
+    -webkit-backdrop-filter: blur(16px) saturate(140%) !important;
+}
+
+body #chat::before {
+    opacity: 0.48 !important;
+}
