@@ -51,7 +51,7 @@ class Config(core.module.Module):
 
         try:
             # Deep copy to avoid mutating the actual live configuration
-            config_data = copy.deepcopy(core.config.config)
+            config_data = copy.deepcopy(dict(core.config.config))
             redacted_config = self._redact_sensitive_info(config_data)
             return json.dumps(redacted_config)
         except Exception as e:

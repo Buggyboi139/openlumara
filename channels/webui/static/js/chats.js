@@ -789,7 +789,11 @@ async function moveChatToCategory(chatId, newCategory) {
 }
 
 async function newChat() {
-    if (isStreaming) await stopGeneration();
+    if (isStreaming) {
+        await stopGeneration(false);
+        isStreaming = false;
+        isDataStreaming = false;
+    }
     try {
         const [prefix, id] = activeCategory.split(':');
         const isMetadataGroup = prefix && METADATA_GROUP_CONFIG[prefix];
@@ -908,7 +912,11 @@ async function loadChat(chatId) {
         return;
     }
 
-    if (isStreaming) await stopGeneration();
+    if (isStreaming) {
+        await stopGeneration(false);
+        isStreaming = false;
+        isDataStreaming = false;
+    }
 
     try {
         const response = await fetch('/chat/load?id=' + chatId);
