@@ -966,19 +966,16 @@ async def clear_chat(user: str = Depends(require_auth)):
     return {"success": True}
 
 @app.post("/chat/delete")
-async def delete_chat(request: Request, user: str = Depends(require_auth)):
+async def delete_chat(id: str, user: str = Depends(require_auth)):
     if not channel_instance:
         raise HTTPException(status_code=500, detail="Channel not available")
 
-    data = await request.json()
-    conv_id = data.get('id')
-
-    if not conv_id:
-        raise HTTPException(status_code=400, detail="No chat ID provided")
-
-    success = await channel_instance.context.chat.delete(conv_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Chat not found")
+    try:
+        # Execute the deletion without checking if it returns True
+        await channel_instance.context.chat.delete(id)
+    except Exception as e:
+        # Only fail if the deletion actually throws a real error
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
 
     return {'success': True}
 

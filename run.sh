@@ -3,7 +3,7 @@
 # set everything up if needed
 if [ ! -d "venv" ]; then
     echo "setting up virtual environment..."
-    python -m venv venv
+    python3 -m venv venv
     venv/bin/pip install -r requirements.txt
 fi
 
@@ -12,4 +12,4 @@ echo "auto updating from openlumara github.."
 git pull
 # aaand run!
 source venv/bin/activate
-python main.py $*
+python3 main.py $*
