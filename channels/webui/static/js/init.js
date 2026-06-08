@@ -123,6 +123,21 @@ function handleNewMessage(msg) {
     updateTokenUsage();
 }
 
+function initSettingsGroupCollapse() {
+    const form = document.getElementById('settings-form');
+    if (!form) return;
+
+    form.addEventListener('click', (event) => {
+        const header = event.target.closest('.settings-group-header');
+        if (!header || !form.contains(header)) return;
+
+        const group = header.closest('.settings-group');
+        if (!group) return;
+
+        group.classList.toggle('is-open');
+    });
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================
@@ -156,6 +171,7 @@ async function init() {
         loadTheme();
         loadChats();
         initTagFilterState();
+        initSettingsGroupCollapse();
 
         window.addEventListener('resize', handleTitleBarResize);
 
