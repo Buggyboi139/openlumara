@@ -1,4 +1,6 @@
-/* ==========================================================================
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+/* ========================================================================== 
  *  CSS Custom Properties (Theme Variables)
  *  Enhanced for modern design
  *  ========================================================================== */
@@ -68,8 +70,8 @@
     --sidebar-width: 420px;
     
     /* === TYPOGRAPHY === */
-    --font-primary: 'Arial', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    --font-display: 'Arial', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-primary: 'Plus Jakarta Sans', 'Arial', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-display: 'Plus Jakarta Sans', 'Arial', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-family: var(--font-primary);
     --code-font: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Monaco', monospace;
     
