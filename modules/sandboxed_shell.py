@@ -48,7 +48,7 @@ class SandboxedShell(core.module.Module):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Resolve the host path and ensure it exists.
-        self.host_workspace = core.get_path(os.path.expanduser(self.config.get("sandbox_path", default="~/sandbox")))
+        self.host_workspace = os.path.expanduser(self.config.get("sandbox_path", default="~/sandbox"))
         if not os.path.exists(self.host_workspace):
             os.makedirs(self.host_workspace, exist_ok=True)
 
@@ -88,13 +88,14 @@ class SandboxedShell(core.module.Module):
                 '--cpus', str(self.config.get("cpu_limit", default=0.5)),
                 '--memory', self.config.get("memory_limit", default="256m"),
                 '--pids-limit', str(self.config.get("max_processes", default=50)),
-                '--network', 'bridge' if self.config.get("internet_access", default=False) else 'none'
+                '--network', 'bridge' if self.config.get("internet_access", default=False) else 'none',
+                '--rm',
             ]
 
             if self.config.get("persistent_data", default=True):
                 start_cmd.extend(['-v', f"{self.host_workspace}:/data:Z"])
             else:
-                start_cmd.extend(['--rm', '--tmpfs', '/data'])
+                start_cmd.extend(['--tmpfs', '/data'])
 
             # set working dir to /data
             start_cmd.extend(['-w', '/data'])
