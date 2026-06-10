@@ -1151,30 +1151,31 @@ function handleCatchError(err, aiMsgDiv, aiWrapper, streamStarted) {
 // =============================================================================
 
 async function stopGeneration(sent_from_command = false) {
-    // Abort local fetch
+    const streamId = currentStreamId;
+
+    // Notify backend before aborting the browser fetch. The backend can cancel
+    // even without a stream id because /cancel sets the shared API cancel flag.
+    try {
+        await fetch('/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: streamId || null })
+        }).catch(() => {});
+
+        if (streamId && window.socket && window.socket.readyState === WebSocket.OPEN) {
+            window.socket.send(JSON.stringify({ type: 'stop' }));
+            window.socket.send(JSON.stringify({ type: 'cancel', id: streamId }));
+        }
+    } catch (e) {
+        // Ignore network errors during cancellation
+    }
+
+    currentStreamId = null;
+
+    // Abort local fetch after the backend has been told to stop.
     if (currentController) {
         currentController.abort();
         currentController = null;
-    }
-
-    // Notify backend via WebSocket
-    if (currentStreamId) {
-        try {
-            if (window.socket && window.socket.readyState === WebSocket.OPEN) {
-                window.socket.send(JSON.stringify({ type: 'stop' }));
-                window.socket.send(JSON.stringify({ type: 'cancel', id: currentStreamId }));
-            } else {
-                // Fallback: use HTTP endpoint if WebSocket is unavailable
-                await fetch('/cancel', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: currentStreamId })
-                }).catch(() => {});
-            }
-        } catch (e) {
-            // Ignore network errors during cancellation
-        }
-        currentStreamId = null;
     }
 
     // Force drain typewriter
