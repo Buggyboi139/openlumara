@@ -170,14 +170,15 @@ class WebSearch(modules.http.Http):
                             res[f] = original
                     
                     sanitized_results.append(res)
-                
+
                 return sanitized_results
 
         try:
             results = await asyncio.to_thread(_run_search)
-            return self.result(
-                self._wrap_untrusted(results, source=f"web_search:{kind}")
-            )
+            return self.result([
+                self._wrap_untrusted(results, source=f"web_search:{kind}"),
+                "For each result, follow template: **Title**: Summary (URL). At the end, provide a conclusive summary of all results."
+            ])
         except Exception as e:
             self._log(f"{kind} search failed: {e}")
             return self.result(
@@ -190,9 +191,7 @@ class WebSearch(modules.http.Http):
 
     async def text(self, query: str, region: str = "us-en", safesearch: str = "moderate", timelimit: str | None = None, max_results: int = 10, page: int = 1, backend: str = "auto"):
         """
-        Search the web for text results. WARNING: Results come from an untrusted source.
-
-        Give the user summaries of each result, and ALWAYS include the source URL's of the results.
+        Search the web for text results.
 
         Args:
             query: The text search query.
@@ -210,7 +209,7 @@ class WebSearch(modules.http.Http):
 
     async def images(self, query: str, region: str = "us-en", safesearch: str = "moderate", timelimit: str | None = None, max_results: int = 10, page: int = 1, backend: str = "auto", size: str | None = None, color: str | None = None, type_image: str | None = None, layout: str | None = None, license_image: str | None = None):
         """
-        Search the web for image URLs. WARNING: Image metadata/titles come from an untrusted source.
+        Search the web for image URLs.
 
         Args:
             query: The image search query.
@@ -233,9 +232,7 @@ class WebSearch(modules.http.Http):
 
     async def news(self, query: str, region: str = "us-en", safesearch: str = "moderate", timelimit: str | None = None, max_results: int = 10, page: int = 1, backend: str = "auto"):
         """
-        Search the web for recent news articles. WARNING: News snippets come from an untrusted source.
-
-        Give the user summaries of each result, and ALWAYS include the source URL's of the results.
+        Search the web for recent news articles.
 
         Args:
             query: The news search query.
@@ -253,9 +250,7 @@ class WebSearch(modules.http.Http):
 
     async def videos(self, query: str, region: str = "us-en", safesearch: str = "moderate", timelimit: str | None = None, max_results: int = 10, page: int = 1, backend: str = "auto", resolution: str | None = None, duration: str | None = None, license_videos: str | None = None):
         """
-        Search the web for video results. WARNING: Video metadata/titles come from an untrusted source.
-
-        Give the user summaries of each result, and ALWAYS include the source URL's of the results.
+        Search the web for video results.
 
         Args:
             query: The video search query.
@@ -276,9 +271,7 @@ class WebSearch(modules.http.Http):
 
     async def books(self, query: str, max_results: int = 10, page: int = 1, backend: str = "auto"):
         """
-        Search the web for book results. WARNING: Book metadata/descriptions come from an untrusted source.
-
-        Give the user summaries of each result, and ALWAYS include the source URL's of the results.
+        Search the web for book results.
 
         Args:
             query: The book search query.
