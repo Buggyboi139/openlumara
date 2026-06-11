@@ -86,7 +86,6 @@ class SandboxedShell(core.module.Module):
             core.log("sandbox_shell", "Starting container..")
 
             uid = self.config.get("run_as_user", default="65534")
-            is_nobody = (uid == "65534")
 
             start_cmd = [
                 self.runtime, 'run', '-d',
@@ -96,7 +95,6 @@ class SandboxedShell(core.module.Module):
                 '--memory', self.config.get("memory_limit", default="256m"),
                 '--pids-limit', str(self.config.get("max_processes", default=50)),
                 '--network', 'bridge' if self.config.get("internet_access", default=False) else 'none',
-                '--cgroup-manager', 'cgroupfs' if is_nobody else 'systemd',
                 '--rm',
             ]
 
