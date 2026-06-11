@@ -124,39 +124,41 @@ class Client(discord.Client):
                             content = content.replace("<@>", "")
                             content = content.strip()
 
-                        cmd_prefix = core.config.get("core").get("cmd_prefix", "/")
+                        orig_content = str(content)
+                        content = ""
+
+                        group_chat = self.ai_channel.config.get("enable_group_chat")
+
+                        # check if the message is a reply
+                        if message.reference:
+                            # this gets the actual message object being replied to
+                            replied_message = await message.channel.fetch_message(message.reference.message_id)
+
+                            # format it like a reply
+                            replied_content = replied_message.content or ""
+                            replied_message_formatted = "> "+"\n> ".join(replied_content.split("\n"))
+                            content += f"in reply to:\n{replied_message_formatted}\n\n"
+
+                        # if group chat is enabled, make the AI aware of who is speaking
+                        if group_chat:
+                            content += f"{message.author.display_name} said: {orig_content}"
+                        else:
+                            content += orig_content
+
+                        # thanks to run0sh for finding this exploit
+                        # you were previously able to simply fool the bot into executing a command
+                        # by changing your name to something like `/module unsafe_shell`
+                        # moving it down here fixes that... lol
+                        # human error, amiright?
+                        # yay non-vibecoded mistakes
+                        cmd_prefix, cmd, args = await self.ai_channel.commands._extract_cmd(content)
                         is_cmd = content.lower().strip().startswith(cmd_prefix.lower())
-                        try:
-                            cmd = content.split(cmd_prefix)[0]
-                        except:
-                            return await message.channel.send("Error while splitting command prefix.. somehow")
 
                         if is_cmd:
-                            if cmd not in self.public_commands:
+                            if cmd[0] not in self.public_commands:
                                 authorised_id = self.ai_channel.config.get("authorised_user_id")
                                 if authorised_id and message.author.id != int(authorised_id):
                                     return await message.channel.send("Only the bot owner is allowed to use commands!")
-                        else:
-                            orig_content = str(content)
-                            content = ""
-
-                            group_chat = self.ai_channel.config.get("enable_group_chat")
-
-                            # check if the message is a reply
-                            if message.reference:
-                                # this gets the actual message object being replied to
-                                replied_message = await message.channel.fetch_message(message.reference.message_id)
-
-                                # format it like a reply
-                                replied_content = replied_message.content or ""
-                                replied_message_formatted = "> "+"\n> ".join(replied_content.split("\n"))
-                                content += f"in reply to:\n{replied_message_formatted}\n\n"
-
-                            # if group chat is enabled, make the AI aware of who is speaking
-                            if group_chat:
-                                content += f"{message.author.display_name} said: {orig_content}"
-                            else:
-                                content += orig_content
 
                     except Exception as e:
                         return await message.channel.send(f"error while processing your request: {e}")
