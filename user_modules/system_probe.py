@@ -1,19 +1,22 @@
+import core
 import asyncio
 import os
+import re
 import platform
 import time
 from datetime import datetime
 
-import core
-
 
 class SystemProbe(core.module.Module):
     """
-    Read-only Linux diagnostics module for AMD GPUs.
-    Uses Python and sysfs/procfs only.
-    No subprocess, no shell, no terminal access.
+    Read-only Linux system diagnostics for AMD GPU systems.
+    Reports CPU name, CPU temperature, AMD GPU names, GPU temperatures, GPU usage,
+    memory usage, disk usage, uptime, load average, and top processes.
+    This module does not use terminal access, subprocess, shell commands, file writes,
+    network access, or user-supplied paths.
     """
 
+    # 1. SETTINGS
     settings = {
         "process_limit": {
             "default": 10,
@@ -37,16 +40,22 @@ class SystemProbe(core.module.Module):
         },
         "disk_path": {
             "default": "/",
-            "description": "Disk path to report usage for. This is config-only, not user command input."
+            "description": "Disk path to report usage for. This is config-only, not chat input."
         }
     }
 
-    SYS_DRM = "/sys/class/drm"
-    DEV_DRI = "/dev/dri"
-
+    # 2. INITIALIZATION
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.sys_drm_path = "/sys/class/drm"
+        self.dev_dri_path = "/dev/dri"
+
+    # 3. STARTUP TASKS
+    async def on_ready(self):
+        pass
+
+    # INTERNAL HELPERS
     def _cfg(self, key, default=None):
         value = self.config.get(key, default=default)
         return default if value is None else value
@@ -62,13 +71,16 @@ class SystemProbe(core.module.Module):
 
     def _clip(self, value, limit=140):
         text = str(value or "").replace("\n", " ").replace("\r", " ").strip()
+        text = re.sub(r"\s+", " ", text)
         return text[:limit].rstrip() + "..." if len(text) > limit else text
 
     def _read_text(self, path):
         try:
             path = os.path.abspath(path)
+
             if not path.startswith("/sys/") and not path.startswith("/proc/"):
                 return None
+
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read().strip()
         except Exception:
@@ -76,8 +88,10 @@ class SystemProbe(core.module.Module):
 
     def _read_int(self, path):
         text = self._read_text(path)
+
         if text is None or text == "":
             return None
+
         try:
             return int(text.split()[0])
         except Exception:
@@ -94,6 +108,11 @@ class SystemProbe(core.module.Module):
             return round(float(value) / (1024 ** 2), 1)
         except Exception:
             return None
+
+    def _fmt_value(self, value, suffix=""):
+        if value is None:
+            return "unavailable"
+        return f"{value}{suffix}"
 
     def _get_cpu_name(self):
         try:
@@ -112,6 +131,7 @@ class SystemProbe(core.module.Module):
             import psutil
 
             temps = psutil.sensors_temperatures(fahrenheit=False)
+
             if not temps:
                 return None
 
@@ -132,12 +152,15 @@ class SystemProbe(core.module.Module):
 
             for key in preferred:
                 entries = temps.get(key)
+
                 if not entries:
                     continue
 
                 readings = []
+
                 for item in entries:
                     temp = valid_temp(getattr(item, "current", None))
+
                     if temp is not None:
                         readings.append(temp)
 
@@ -149,11 +172,13 @@ class SystemProbe(core.module.Module):
 
             for key, entries in temps.items():
                 key_lower = str(key).lower()
+
                 if any(word in key_lower for word in skip_words):
                     continue
 
                 for item in entries:
                     temp = valid_temp(getattr(item, "current", None))
+
                     if temp is not None:
                         fallback.append(temp)
 
@@ -164,7 +189,7 @@ class SystemProbe(core.module.Module):
 
     def _safe_drm_cards(self):
         try:
-            entries = os.listdir(self.SYS_DRM)
+            entries = os.listdir(self.sys_drm_path)
         except Exception:
             return []
 
@@ -175,20 +200,21 @@ class SystemProbe(core.module.Module):
                 continue
 
             suffix = entry[4:]
+
             if not suffix.isdigit():
                 continue
 
-            card_path = os.path.abspath(os.path.join(self.SYS_DRM, entry))
+            card_path = os.path.abspath(os.path.join(self.sys_drm_path, entry))
             device_path = os.path.abspath(os.path.join(card_path, "device"))
 
-            if not card_path.startswith(self.SYS_DRM):
+            if not card_path.startswith(self.sys_drm_path):
                 continue
 
             vendor = self._read_text(os.path.join(device_path, "vendor"))
-            driver = self._read_text(os.path.join(device_path, "uevent")) or ""
+            uevent = self._read_text(os.path.join(device_path, "uevent")) or ""
 
             is_amd = vendor and vendor.lower() == "0x1002"
-            uses_amdgpu = "DRIVER=amdgpu" in driver
+            uses_amdgpu = "DRIVER=amdgpu" in uevent
 
             if is_amd or uses_amdgpu:
                 cards.append({
@@ -208,6 +234,7 @@ class SystemProbe(core.module.Module):
         for line in raw.splitlines():
             if "=" not in line:
                 continue
+
             key, value = line.split("=", 1)
             parsed[key.strip()] = value.strip()
 
@@ -215,10 +242,12 @@ class SystemProbe(core.module.Module):
 
     def _get_gpu_name(self, card, device_path):
         product_name = self._read_text(os.path.join(device_path, "product_name"))
+
         if product_name:
             return self._clip(product_name, 160)
 
         product_number = self._read_text(os.path.join(device_path, "product_number"))
+
         if product_number:
             return self._clip(product_number, 160)
 
@@ -236,6 +265,7 @@ class SystemProbe(core.module.Module):
 
     def _get_hwmon_dirs(self, device_path):
         hwmon_root = os.path.join(device_path, "hwmon")
+
         try:
             names = os.listdir(hwmon_root)
         except Exception:
@@ -248,6 +278,7 @@ class SystemProbe(core.module.Module):
                 continue
 
             path = os.path.abspath(os.path.join(hwmon_root, name))
+
             if path.startswith(os.path.abspath(hwmon_root)):
                 dirs.append(path)
 
@@ -273,25 +304,23 @@ class SystemProbe(core.module.Module):
                 label_path = os.path.join(hwmon, f"temp{sensor_id}_label")
 
                 raw = self._read_int(input_path)
+
                 if raw is None:
                     continue
 
-                if raw > 1000:
-                    temp_c = round(raw / 1000, 1)
-                else:
-                    temp_c = round(float(raw), 1)
+                temp_c = round(raw / 1000, 1) if raw > 1000 else round(float(raw), 1)
 
                 if temp_c <= 0 or temp_c >= 130:
                     continue
 
                 label = self._read_text(label_path) or hwmon_name or f"temp{sensor_id}"
+
                 temps.append({
                     "label": self._clip(label, 60),
                     "temp_c": temp_c
                 })
 
         priority = ["edge", "junction", "hotspot", "mem", "memory"]
-
         primary = None
 
         for wanted in priority:
@@ -299,6 +328,7 @@ class SystemProbe(core.module.Module):
                 if wanted in item["label"].lower():
                     primary = item
                     break
+
             if primary:
                 break
 
@@ -316,6 +346,7 @@ class SystemProbe(core.module.Module):
         for hwmon in self._get_hwmon_dirs(device_path):
             for name in ["power1_average", "power1_input"]:
                 value = self._read_int(os.path.join(hwmon, name))
+
                 if value is not None and value > 0:
                     candidates.append(value)
 
@@ -331,6 +362,30 @@ class SystemProbe(core.module.Module):
             return round(value / 1000, 1)
 
         return round(float(value), 1)
+
+    def _get_gpu_device_nodes(self, card_info):
+        nodes = []
+        card = card_info["card"]
+        card_node = os.path.join(self.dev_dri_path, card)
+
+        if os.path.exists(card_node):
+            nodes.append(card_node)
+
+        drm_dir = os.path.join(card_info["device_path"], "drm")
+
+        try:
+            entries = os.listdir(drm_dir)
+        except Exception:
+            return nodes
+
+        for entry in entries:
+            if entry.startswith("renderD"):
+                node = os.path.join(self.dev_dri_path, entry)
+
+                if os.path.exists(node):
+                    nodes.append(node)
+
+        return sorted(set(nodes))
 
     def _get_amd_gpus(self):
         gpus = []
@@ -351,8 +406,6 @@ class SystemProbe(core.module.Module):
             gtt_total = self._read_int(os.path.join(device_path, "mem_info_gtt_total"))
             gtt_used = self._read_int(os.path.join(device_path, "mem_info_gtt_used"))
 
-            power = self._get_gpu_power_watts(device_path)
-
             gpus.append({
                 "card": card,
                 "index": card_index,
@@ -366,35 +419,11 @@ class SystemProbe(core.module.Module):
                 "vram_total_mib": self._bytes_to_mib(vram_total),
                 "gtt_used_mib": self._bytes_to_mib(gtt_used),
                 "gtt_total_mib": self._bytes_to_mib(gtt_total),
-                "power_w": power,
+                "power_w": self._get_gpu_power_watts(device_path),
                 "device_nodes": self._get_gpu_device_nodes(card_info)
             })
 
         return gpus
-
-    def _get_gpu_device_nodes(self, card_info):
-        nodes = []
-
-        card = card_info["card"]
-        card_node = os.path.join(self.DEV_DRI, card)
-
-        if os.path.exists(card_node):
-            nodes.append(card_node)
-
-        drm_dir = os.path.join(card_info["device_path"], "drm")
-
-        try:
-            entries = os.listdir(drm_dir)
-        except Exception:
-            return nodes
-
-        for entry in entries:
-            if entry.startswith("renderD"):
-                node = os.path.join(self.DEV_DRI, entry)
-                if os.path.exists(node):
-                    nodes.append(node)
-
-        return sorted(set(nodes))
 
     def _get_gpu_processes(self, gpus):
         if not self._bool_cfg("include_gpu_processes", True):
@@ -436,10 +465,12 @@ class SystemProbe(core.module.Module):
                         continue
 
                     gpu_card = node_to_gpu.get(target)
+
                     if not gpu_card:
                         continue
 
                     key = (gpu_card, pid)
+
                     if key in seen:
                         continue
 
@@ -543,6 +574,7 @@ class SystemProbe(core.module.Module):
     def _get_load(self):
         try:
             one, five, fifteen = os.getloadavg()
+
             return {
                 "1m": round(one, 2),
                 "5m": round(five, 2),
@@ -595,11 +627,6 @@ class SystemProbe(core.module.Module):
             "processes": self._get_top_processes()
         }
 
-    def _fmt_value(self, value, suffix=""):
-        if value is None:
-            return "unavailable"
-        return f"{value}{suffix}"
-
     def _format_temps(self, snapshot):
         lines = []
         cpu = snapshot["cpu"]
@@ -610,7 +637,6 @@ class SystemProbe(core.module.Module):
         lines.append(f"CPU: {cpu['name']}")
         lines.append(f"Temp: {self._fmt_value(cpu['temp_c'], '°C')}")
         lines.append("")
-
         lines.append("AMD GPUs")
 
         if not gpus:
@@ -618,6 +644,7 @@ class SystemProbe(core.module.Module):
         else:
             for gpu in gpus:
                 label = f" ({gpu['temp_label']})" if gpu["temp_label"] else ""
+
                 lines.append(f"{gpu['card']}: {gpu['name']}")
                 lines.append(f"Temp{label}: {self._fmt_value(gpu['temp_c'], '°C')}")
 
@@ -653,13 +680,16 @@ class SystemProbe(core.module.Module):
 
             if gpu.get("all_temps"):
                 temp_parts = []
+
                 for item in gpu["all_temps"]:
                     temp_parts.append(f"{item['label']} {item['temp_c']}°C")
+
                 lines.append(f"Sensors: {', '.join(temp_parts)}")
 
             lines.append("")
 
         lines.append("GPU Processes")
+
         if not snapshot["gpu_processes"]:
             lines.append("No GPU process handles found or permission denied.")
         else:
@@ -675,8 +705,10 @@ class SystemProbe(core.module.Module):
 
         for proc in snapshot["processes"]:
             base = f"PID {proc['pid']}: {proc['name']} CPU {proc['cpu_percent']}% / MEM {proc['memory_percent']}%"
+
             if "user" in proc:
                 base += f" / USER {proc['user']}"
+
             lines.append(base)
 
         return "\n".join(lines)
@@ -744,86 +776,143 @@ class SystemProbe(core.module.Module):
     async def _snapshot(self):
         return await asyncio.to_thread(self._snapshot_sync)
 
-    @core.module.command("sys_temps")
-    async def sys_temps_cmd(self, args: list):
+    # 4. AI TOOLS
+    async def get_system_status(self):
         """
-        Show CPU and AMD GPU temperatures.
-        Usage: /sys_temps
-        """
-        try:
-            snapshot = await self._snapshot()
-            return self._format_temps(snapshot)
-        except Exception:
-            return "Failed to read temperatures."
-
-    @core.module.command("sys_gpu")
-    async def sys_gpu_cmd(self, args: list):
-        """
-        Show AMD GPU names, temperatures, usage, VRAM, GTT, power, and GPU process handles.
-        Usage: /sys_gpu
-        """
-        try:
-            snapshot = await self._snapshot()
-            return self._format_gpu(snapshot)
-        except Exception:
-            return "Failed to read AMD GPU status."
-
-    @core.module.command("sys_processes")
-    async def sys_processes_cmd(self, args: list):
-        """
-        Show top processes.
-        Usage: /sys_processes
-        """
-        try:
-            snapshot = await self._snapshot()
-            return self._format_processes(snapshot)
-        except Exception:
-            return "Failed to read process list."
-
-    @core.module.command("sys_memory")
-    async def sys_memory_cmd(self, args: list):
-        """
-        Show RAM and swap usage.
-        Usage: /sys_memory
-        """
-        try:
-            snapshot = await self._snapshot()
-            return self._format_memory(snapshot)
-        except Exception:
-            return "Failed to read memory status."
-
-    @core.module.command("sys_disk")
-    async def sys_disk_cmd(self, args: list):
-        """
-        Show disk usage.
-        Usage: /sys_disk
-        """
-        try:
-            snapshot = await self._snapshot()
-            return self._format_disk(snapshot)
-        except Exception:
-            return "Failed to read disk status."
-
-    @core.module.command("sys_load")
-    async def sys_load_cmd(self, args: list):
-        """
-        Show load average and uptime.
-        Usage: /sys_load
-        """
-        try:
-            snapshot = await self._snapshot()
-            return self._format_load(snapshot)
-        except Exception:
-            return "Failed to read load status."
-
-    @core.module.command("sys_status")
-    async def sys_status_cmd(self, args: list):
-        """
-        Show full read-only system diagnostic status.
-        Usage: /sys_status
+        Get a full read-only Linux system diagnostic report.
+        Use this when the user asks for overall system status, diagnostics,
+        hardware status, CPU/GPU information, temperatures, memory, disk,
+        uptime, load average, or top running processes.
+        This tool does not run shell commands and does not modify the system.
         """
         try:
             snapshot = await self._snapshot()
             return self._format_status(snapshot)
-        except Exception:
-            return "Failed to read system status."
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    async def get_temperatures(self):
+        """
+        Get CPU and AMD GPU temperatures.
+        Use this when the user asks about system temps, CPU temp, GPU temps,
+        thermal status, overheating, or hardware temperature checks.
+        This tool reads local sensor information only and does not modify the system.
+        """
+        try:
+            snapshot = await self._snapshot()
+            return self._format_temps(snapshot)
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    async def get_gpu_status(self):
+        """
+        Get AMD GPU names, temperatures, GPU usage, memory usage, VRAM usage,
+        GTT usage, power usage, and visible GPU process handles.
+        Use this when the user asks about GPU usage, GPU load, VRAM, graphics cards,
+        AMD GPU status, or what is using the GPUs.
+        This tool does not run terminal commands or change GPU settings.
+        """
+        try:
+            snapshot = await self._snapshot()
+            return self._format_gpu(snapshot)
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    async def get_processes(self):
+        """
+        Get the top running processes sorted by CPU and memory usage.
+        Use this when the user asks what processes are using system resources.
+        This tool returns process IDs, process names, CPU percentage, and memory percentage.
+        It does not return command-line arguments and cannot kill or modify processes.
+        """
+        try:
+            snapshot = await self._snapshot()
+            return self._format_processes(snapshot)
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    async def get_memory_status(self):
+        """
+        Get RAM and swap usage.
+        Use this when the user asks about memory usage, RAM pressure, swap usage,
+        or basic memory diagnostics.
+        """
+        try:
+            snapshot = await self._snapshot()
+            return self._format_memory(snapshot)
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    async def get_disk_status(self):
+        """
+        Get disk usage for the configured disk path.
+        Use this when the user asks about disk usage, free space, or storage status.
+        The path comes only from module config, not from chat input.
+        """
+        try:
+            snapshot = await self._snapshot()
+            return self._format_disk(snapshot)
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    async def get_load_status(self):
+        """
+        Get Linux load average and system uptime.
+        Use this when the user asks about system load, uptime, boot time,
+        or whether the machine is under heavy CPU scheduling pressure.
+        """
+        try:
+            snapshot = await self._snapshot()
+            return self._format_load(snapshot)
+        except Exception as e:
+            return f"Tool execution failed: {str(e)}"
+
+    # 5. USER COMMANDS
+    @core.module.command("sys_status")
+    async def sys_status_cmd(self, args: list):
+        """
+        Usage: /sys_status
+        """
+        return await self.get_system_status()
+
+    @core.module.command("sys_temps")
+    async def sys_temps_cmd(self, args: list):
+        """
+        Usage: /sys_temps
+        """
+        return await self.get_temperatures()
+
+    @core.module.command("sys_gpu")
+    async def sys_gpu_cmd(self, args: list):
+        """
+        Usage: /sys_gpu
+        """
+        return await self.get_gpu_status()
+
+    @core.module.command("sys_processes")
+    async def sys_processes_cmd(self, args: list):
+        """
+        Usage: /sys_processes
+        """
+        return await self.get_processes()
+
+    @core.module.command("sys_memory")
+    async def sys_memory_cmd(self, args: list):
+        """
+        Usage: /sys_memory
+        """
+        return await self.get_memory_status()
+
+    @core.module.command("sys_disk")
+    async def sys_disk_cmd(self, args: list):
+        """
+        Usage: /sys_disk
+        """
+        return await self.get_disk_status()
+
+    @core.module.command("sys_load")
+    async def sys_load_cmd(self, args: list):
+        """
+        Usage: /sys_load
+        """
+        return await self.get_load_status()
