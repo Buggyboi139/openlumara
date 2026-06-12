@@ -71,12 +71,13 @@ class SandboxedFiles(core.module.Module):
         return core.sandbox_path(self.sandbox_path, target_path)
 
     def _strip_sandbox_path(self, path: str):
-        prefix = self.sandbox_path + os.sep
-        if path.startswith(prefix):
-            return path[len(prefix):]
-        elif path == self.sandbox_path:
-            return ""
-        return path
+        try:
+            rel = os.path.relpath(path, self.sandbox_path)
+            if rel.startswith('..'):
+                return None # Path escaped the sandbox
+            return rel
+        except (ValueError, OSError):
+            return None
 
     async def list_dir(self, path: str) -> dict:
         """List the files inside the sandbox. Use relative paths.

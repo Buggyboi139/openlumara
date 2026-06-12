@@ -82,7 +82,8 @@ def sandbox_path(base_path: str, requested_path: str) -> str:
     """
     protects against path traversal attacks and the like
     """
-    path = requested_path
+    # normalize slashes to handle cross-platform stuff
+    path = os.path.normpath(requested_path)
 
     # remove path separator at the beginning and end
     path = path.strip(os.path.sep)
