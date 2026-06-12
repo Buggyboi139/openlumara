@@ -544,8 +544,8 @@ async function send(providedContent = null) {
                             renderStreamSegments(aiMsgDiv);
 
 
-                            // Play sound on every token if streaming sound is enabled AND typewriter mode is OFF
-                            if (!useTypewriter && useStreamingSound) {
+                            // Play sound on every token if streaming sound is enabled
+                            if (useStreamingSound) {
                                 TypewriterAudioManager.play('token');
                             }
                         }
@@ -568,8 +568,8 @@ async function send(providedContent = null) {
                         ensureToolCallsSegment();
                         handleToolCallDelta(data, aiMsgDiv, aiWrapper);
 
-                        // Play sound on every token if streaming sound is enabled AND typewriter mode is OFF
-                        if (!useTypewriter && useStreamingSound) {
+                        // Play sound on every token if streaming sound is enabled
+                        if (useStreamingSound) {
                             TypewriterAudioManager.play('token');
                         }
                     }
