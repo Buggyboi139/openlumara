@@ -196,7 +196,8 @@ class StorageDict(dict):
         """Convert flat keys like 'ideas/opticlaw/topic' into nested dict structure."""
         result = {}
         for key, value in flat_dict.items():
-            parts = key.split("/")
+            # normalize separators to / to handle Windows-style paths
+            parts = key.replace("\\", "/").split("/")
             current = result
             for part in parts[:-1]:
                 if part not in current:
@@ -219,17 +220,21 @@ class StorageDict(dict):
 
     def _delete_nested_key(self, flat_key):
         """Delete a key from the nested dict structure."""
-        # Convert nested dict to flat keys
-        flat_dict = self._flatten_nested_keys(dict(self))
-        
-        # Delete the key if it exists
-        if flat_key in flat_dict:
-            del flat_dict[flat_key]
-        
-        # Convert back to nested dict and update self
-        nested_dict = self._parse_nested_keys(flat_dict)
-        self.clear()
-        self.update(nested_dict)
+        # normalize the key to ensure consistent splitting
+        parts = flat_key.replace("\\", "/").split("/")
+
+        current = self
+        # traverse down to the parent dictionary of the target key
+        for part in parts[:-1]:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                # the path doesn't exist, nothing to delete
+                return
+
+        # delete the target key from the parent dictionary
+        if isinstance(current, dict) and parts[-1] in current:
+            del current[parts[-1]]
 
     def save(self):
         """save content to file"""
@@ -282,10 +287,20 @@ class StorageDict(dict):
                 for root, dirs, files in os.walk(self.path, topdown=False):
                     for filename in files:
                         if filename.endswith(".md"):
-                            rel_path = os.path.relpath(os.path.join(root, filename), self.path)
-                            key = rel_path[:-3]  # remove .md extension
-                            if key not in flat_items:
-                                os.remove(os.path.join(root, filename))
+                            full_path = os.path.join(root, filename)
+                            rel_path = os.path.relpath(full_path, self.path)
+
+                            # remove the .md extension
+                            path_no_ext = rel_path[:-3]
+
+                            # normalize path to make it cross-platform
+                            normalized = os.path.normpath(path_no_ext)
+
+                            # split by the OS-specific separator and join with '/'
+                            logical_key = "/".join(normalized.split(os.sep))
+
+                            if logical_key not in flat_items:
+                                os.remove(full_path)
 
                     # remove empty directories
                     if root != self.path and not os.listdir(root):
@@ -320,10 +335,16 @@ class StorageDict(dict):
                 for root, dirs, files in os.walk(self.path):
                     for filename in files:
                         if filename.endswith(".md"):
+                            full_path = os.path.join(root, filename)
                             rel_path = os.path.relpath(os.path.join(root, filename), self.path)
-                            # Use sandbox_path to safely resolve and validate the target path
-                            full_path = core.sandbox_path(self.path, rel_path)
-                            key = rel_path[:-3]  # remove .md extension
+                            # remove .md extension
+                            path_without_ext = rel_path[:-3]
+
+                            # normalize to the current OS (turns '/' to '\' on windows)
+                            normalized_path = os.path.normpath(path_without_ext)
+
+                            # split by the OS-specific separator and join with '/'
+                            key = "/".join(normalized_path.split(os.sep))
 
                             with open(full_path, "r", encoding="utf-8") as f:
                                 flat_dict[key] = str(f.read())
