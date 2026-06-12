@@ -28,6 +28,10 @@ class SandboxedShell(core.module.Module):
             "default": 10,
             "description": "Maximum amount of time (in seconds) a process inside the shell is allowed to run for"
         },
+        "output_limit": {
+            "default": 2000,
+            "description": "Maximum amount of characters before output gets truncated. Prevents resource exhaustion attacks that overflow the application using too much output"
+        },
         "cpu_limit": {
             "default": 0.5,
             "type": "percentage",
@@ -130,6 +134,8 @@ class SandboxedShell(core.module.Module):
         cmd.extend(['-w', '/data'])
         cmd.extend([img, 'sh', '-c', command])
 
+        output_limit = self.config.get("output_limit")
+
         process = None
         try:
             # Start the container in detached mode
@@ -161,8 +167,8 @@ class SandboxedShell(core.module.Module):
             )
             
             return self.result({
-                "stdout": log_process.stdout.decode().strip(),
-                "stderr": log_process.stderr.decode().strip(),
+                "stdout": log_process.stdout.decode().strip()[:output_limit],
+                "stderr": log_process.stderr.decode().strip()[:output_limit],
                 "exit_code": wait_process.returncode,
                 "data_dir": "/data"
             })
