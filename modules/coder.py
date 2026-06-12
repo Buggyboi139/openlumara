@@ -1869,7 +1869,7 @@ class Coder(modules.sandboxed_files.SandboxedFiles):
 
     async def search_replace(self, project_name: str, file_path: str, query: str, replacement: str):
         """
-        Replace all instances of a string or regex pattern across the entire file content.
+        Replace all instances of a string across the entire file content.
         Replaces ALL OCCURENCES of the query string with the replacement string.
         """
         file_path_str = self._get_file_path(project_name, file_path)
@@ -1945,7 +1945,7 @@ class Coder(modules.sandboxed_files.SandboxedFiles):
             return self.result(f"error: {e}", success=False)
 
     async def grep(self, project_name: str, path: list = None, pattern: str = "", case_sensitive: bool = False, max_results: int = None):
-        """Search for a pattern across files in a project."""
+        """Search for a pattern across files in a project. does not support regex patterns."""
 
         search_dir = self._get_project_path(project_name)
         if path:
