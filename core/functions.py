@@ -136,11 +136,13 @@ def sandbox_path(base_path: str, requested_path: str) -> str:
     if sys.platform == "win32":
         check_path = real_path.lower()
         check_prefix = base_prefix.lower()
+        check_base = base_path.lower()
     else:
         check_path = real_path
         check_prefix = base_prefix
+        check_base = base_path
 
-    if check_path.startswith(check_prefix) or check_path == base_path:
+    if check_path.startswith(check_prefix) or check_path == check_base:
         return real_path
     else:
         raise ValueError("Access denied: target path is outside sandbox")
