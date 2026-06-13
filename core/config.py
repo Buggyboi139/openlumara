@@ -27,6 +27,7 @@ default_config = {
         "max_context": 8192,
         "max_output_tokens": 8192,
         "max_messages": 200,
+        "check_developer_role_support": False,
         "custom_fields": {}
     },
     "model": {
@@ -358,265 +359,62 @@ def _get_file_checksum(filepath):
     except Exception:
         return ""
 
+def _sync_section(config_data, section_key, available_names, enabled_names=None, default_names=None):
+    enabled_names = enabled_names or []
+    default_names = default_names or []
+    section = config_data.setdefault(section_key, {})
 
-def get_schema(*args, **kwargs):
-    """
-    Returns the config schema using the on-disk cache.
-    Contains all possible module settings to allow persistence for disabled modules.
-    """
-    schema = copy.deepcopy(default_config)
-    cache = _get_module_schema_cache()
+    section.setdefault("enabled", [])
+    section.setdefault("disabled", [])
+    section.setdefault("settings", {})
 
-    for section_key, section_cache in cache.items():
-        section = schema.setdefault(section_key, {})
-        settings = section.setdefault("settings", {})
-        for name, data in section_cache.items():
-            # Flatten the settings here so the schema only contains values.
-            # This prevents metadata (description, default) from leaking into the config file.
-            settings[name] = _flatten_settings(data["schema"])
-
-    return schema
-
-def get_module_structure():
-    """
-    Returns a flat dictionary containing settings and metadata for all
-    available modules, channels, and user_modules.
-
-    Structure:
-    {
-        "name": {
-            "settings": { ... },
-            "metadata": {
-                "doc": "...",
-                "unsafe": True/False,
-                "type": "module" | "channel" | "user_module"
-            }
-        }
-    }
-    """
-    cache = _get_module_schema_cache()
-    metadata_registry = {}
-
-    # Map section keys to their descriptive type strings
-    type_map = {
-        "channels": "channel",
-        "modules": "module",
-        "user_modules": "user_module"
-    }
-
-    for section_key, section_cache in cache.items():
-        type_str = type_map.get(section_key, "unknown")
-
-        for name, data in section_cache.items():
-            metadata = data["metadata"]
-
-            metadata_registry[name] = {
-                "settings": data["schema"],
-                "metadata": {
-                    "doc": metadata["docstring"],
-                    "unsafe": metadata["unsafe"],
-                    "type": type_str
-                }
-            }
-
-    return metadata_registry
-
-def sync_config(user_config, schema):
-    """Recursively syncs structural keys from the schema."""
-    if not isinstance(schema, dict) or not isinstance(user_config, dict):
-        return schema
-
-    result = dict(user_config)
-    for key, schema_val in schema.items():
-        if key in result:
-            user_val = result[key]
-            if isinstance(schema_val, (dict, list)) and len(schema_val) == 0:
-                continue
-            if isinstance(schema_val, dict) and isinstance(user_val, dict):
-                result[key] = sync_config(user_val, schema_val)
-        else:
-            result[key] = schema_val
-    return result
-
-def reconcile_lists(available_names, default_names, section_config):
-    """
-    Updates the enabled/disabled lists based on filesystem discovery.
-    available_names comes from filesystem scanning, not imports.
-    """
-    available = set(available_names)
+    disabled = set(section.get("disabled", []))
+    current_enabled = set(section.get("enabled", []))
     defaults = set(default_names)
 
-    enabled = set(section_config.get("enabled", [])) & available
-    disabled = set(section_config.get("disabled", [])) & available
+    if current_enabled:
+        desired_enabled = current_enabled - disabled
+    else:
+        desired_enabled = defaults - disabled
 
-    known = enabled | disabled
-    new_items = available - known
+    # only include names that actually exist
+    desired_enabled = [name for name in sorted(desired_enabled) if name in available_names]
 
-    new_enabled = new_items & defaults
-    new_disabled = new_items - defaults
+    section["enabled"] = desired_enabled
+    section["disabled"] = sorted(disabled)
 
-    return {
-        "enabled": sorted(list(enabled | new_enabled)),
-        "disabled": sorted(list(disabled | new_disabled))
-    }
-
-
-def _flatten_settings(settings_dict):
-    """Recursively flattens a settings dictionary by extracting 'default' values."""
-    if isinstance(settings_dict, dict) and "default" in settings_dict:
-        return _flatten_settings(settings_dict["default"])
-    if isinstance(settings_dict, dict):
-        return {k: _flatten_settings(v) for k, v in settings_dict.items()}
-    return settings_dict
-
-def _merge_module_settings(current_settings, module_defaults):
-    """Recursively merges current_settings with module_defaults schema."""
-    if isinstance(module_defaults, dict) and "default" in module_defaults:
-        if isinstance(current_settings, dict) and "default" in current_settings:
-            return module_defaults["default"]
-        return current_settings if current_settings is not None else module_defaults["default"]
-
-    if not isinstance(module_defaults, dict):
-        return current_settings if current_settings is not None else module_defaults
-
-    if not isinstance(current_settings, dict):
-        current_settings = {}
-
-    new_settings = {}
-    for k, v in module_defaults.items():
-        if k in current_settings:
-            new_settings[k] = _merge_module_settings(current_settings[k], v)
-        else:
-            new_settings[k] = _flatten_settings(v)
-    return new_settings
-
-def sync_module_settings(config_dict, instances, section_key, available_names):
-    """
-    Performs deep pruning and merging of module settings.
-    - Removes settings for modules not on disk.
-    - Keeps settings for disabled modules.
-    - Merges defaults for enabled modules.
-    """
-    section = config_dict.setdefault(section_key, {})
+    # preserve settings for all available items + any existing custom keys
     settings = section.setdefault("settings", {})
+    for name in available_names:
+        settings.setdefault(name, {})
 
-    # 1. Remove settings for modules that are no longer on the filesystem
-    for name in list(settings.keys()):
-        if name not in available_names:
-            del settings[name]
+def sync_config(config_data):
+    # Bootstrap minimal structure first
+    for section_key in ["core", "api", "model", "channels", "modules", "user_modules"]:
+        if section_key not in config_data:
+            config_data[section_key] = copy.deepcopy(default_config.get(section_key, {}))
 
-    # 2. For modules that ARE on disk, handle enabled vs disabled
-    for inst in instances:
-        name = core.modules.get_name(inst)
-        module_defaults = getattr(inst, 'settings', {})
-        if not isinstance(module_defaults, dict):
-            continue
+    # Merge default scalar values into existing config without clobbering user data
+    for section_key, defaults in default_config.items():
+        if isinstance(defaults, dict):
+            section = config_data.setdefault(section_key, {})
+            for key, value in defaults.items():
+                section.setdefault(key, copy.deepcopy(value))
 
-        if name in settings and isinstance(settings[name], dict):
-            # Module is enabled and has existing settings: merge them
-            settings[name] = _merge_module_settings(settings[name], module_defaults)
-            if not settings[name]:
-                del settings[name]
-        elif module_defaults:
-            # Module is enabled but has no existing settings: provide defaults
-            flat_defaults = _flatten_settings(module_defaults)
-            if flat_defaults:
-                settings[name] = flat_defaults
+    enabled_channels = config_data.get("channels", {}).get("enabled")
+    enabled_modules = config_data.get("modules", {}).get("enabled")
+    enabled_user_modules = config_data.get("user_modules", {}).get("enabled")
 
-    # Note: If a module is in available_names but NOT in instances,
-    # it is disabled and we leave its settings in 'settings' untouched.
+    registry_data = _get_registry_data(enabled_channels, enabled_modules, enabled_user_modules)
 
-
-def load(file_path=None):
-    """
-    Load config file.
-    """
-    if file_path:
-        filename = os.path.splitext(os.path.basename(file_path))[0]
-        dirname = os.path.dirname(file_path)
-    else:
-        filename = "config"
-        dirname = core.get_path()
-
-    new_config = False
-
-    global config
-    global _registry_cache
-    _registry_cache = None
-
-    config = core.storage.StorageDict(filename, "yaml", path=dirname, autoreload=False)
-    if not config:
-        new_config = True
-
-    if not new_config and core.storage.TEMPORARY:
-        config.load()
-
-    raw_config = dict(config) if config else {}
-
-    enabled_channels = raw_config.get("channels", {}).get("enabled", [])
-    if not enabled_channels and new_config:
-        enabled_channels = DEFAULT_CHANNELS
-
-    enabled_modules = raw_config.get("modules", {}).get("enabled", [])
-    if not enabled_modules and new_config:
-        enabled_modules = DEFAULT_MODULES
-
-    enabled_user_modules = raw_config.get("user_modules", {}).get("enabled", [])
-
-    # Use the new cached schema (contains all possible settings)
-    schema = get_schema()
-
-    # Registry only contains ENABLED instances and their available names
-    registry = _get_registry_data(enabled_channels, enabled_modules, enabled_user_modules)
-
-    if new_config:
-        target = copy.deepcopy(schema)
-    else:
-        target = sync_config(raw_config, schema)
-
-    # Sync settings and reconcile lists
-    for item in registry:
-        # Pass available_names so we know what to prune
-        sync_module_settings(target, item['instances'], item['section_key'], item['available_names'])
-
-        state = reconcile_lists(
-            item['available_names'],
-            item['default_names'],
-            target.get(item['section_key'], {})
+    for item in registry_data:
+        _sync_section(
+            config_data,
+            item["section_key"],
+            item["available_names"],
+            enabled_names=item["names"],
+            default_names=item["default_names"]
         )
-        target[item['section_key']]['enabled'] = state['enabled']
-        target[item['section_key']]['disabled'] = state['disabled']
+        _inject_settings_into_dict(config_data, item["instances"], item["section_key"])
 
-    config.load(target)
-    config.save()
-
-    if new_config:
-        print(f"A new configuration file has been created at {config.path}.")
-
-def get(*args, **kwargs):
-    """Shorthand for accessing nested config values.
-    Usage: config.get("api", "url") or config.get("api", "url", default_value)
-    """
-    global config, default_config
-
-    default = kwargs.get("default", None)
-    if not args:
-        return default
-
-    keys = list(args)
-    # If the last argument is not a string, or is empty, treat it as an explicit default
-    if keys and not isinstance(keys[-1], str) or not keys[-1]:
-        default = keys.pop()
-
-    # Safely resolve to a dictionary
-    try:
-        value = dict(config) if config else dict(default_config)
-    except (TypeError, ValueError):
-        value = dict(default_config)
-
-    for key in keys:
-        if isinstance(value, dict) and key in value:
-            value = value[key]
-        else:
-            return default
-    return value
+    return config_data
