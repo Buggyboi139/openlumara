@@ -144,7 +144,16 @@ class ToolcallManager:
                     break
 
             if module_instance:
-                if tool_name not in self.channel.manager.tool_names:
+                # remove the module name from the tool name
+                translated_tool_name = tool_name.replace(
+                    f"{module_instance_display_name}_", ""
+                ).strip()
+
+                if (
+                    tool_name not in self.channel.manager.tool_names
+                    or
+                    translated_tool_name in module_instance.disabled_tools
+                ):
                     # don't allow disabled tools to be called
                     rejected_msg = json.dumps({"content": "That tool has been disabled by the user.", "status": "error"})
                     await self.channel.context.chat.add({
@@ -155,10 +164,6 @@ class ToolcallManager:
                     yield {"type": "tool", "tool_call_id": tool_call_dict['id'], "content": rejected_msg}
                     continue
 
-                # remove the module name from the tool name
-                translated_tool_name = tool_name.replace(
-                    f"{module_instance_display_name}_", ""
-                )
                 # and use it to get the function object for that tool
                 func_callable = getattr(module_instance, translated_tool_name)
 
