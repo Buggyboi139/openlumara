@@ -92,9 +92,6 @@ class APIClient():
         self._connection_error = None
         self._connection_attempts = 0
 
-        # Do not run a real completion on connect by default. Local backends such as
-        # llama.cpp may cold-load the entire model for that tiny probe, making app
-        # startup and model switching feel broken even though they work.
         self.supports_developer_role = False
         if bool(api_config.get("check_developer_role_support", False)):
             self.supports_developer_role = await self._check_developer_role_support(self._AI)
@@ -257,7 +254,7 @@ class APIClient():
             return response
 
         try:
-            return await self._recv(response)
+            return await self._recv(response, use_tools=use_tools)
         except Exception as e:
             core.log_error("error while processing response from AI", e)
             return {"error": "processing_failed", **self._get_user_friendly_message("processing_failed", e)}
@@ -273,7 +270,7 @@ class APIClient():
             return
 
         try:
-            async for token in self._recv_stream(response):
+            async for token in self._recv_stream(response, use_tools=use_tools):
                 if self.cancel_request:
                     break
                 yield token
