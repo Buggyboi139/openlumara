@@ -1,41 +1,26 @@
 import core
 import openai
 import asyncio
-import json
 import time
-import inspect
 
 class APIClient():
     """
     wrapper around the openAI API to make sending/receiving messages easier to work with
     """
     def __init__(self, manager):
-        # store a reference to the manager
         self.manager = manager
-
         self.connected = False
-        self._AI = None # replaced later using .connect()
-
+        self._AI = None
         self._model = None
         self._messages = []
-
         self.cancel_request = False
-
         self._connection_error = None
         self._last_connection_attempt = None
         self._connection_attempts = 0
-
-        # used for insecure SSL connections
         self._httpx_client = None
-
         self.supports_developer_role = False
 
     def _get_user_friendly_message(self, error_type, exception=None):
-        """
-        Maps technical error types to polite, actionable messages for end-users.
-        Returns a dict with both a friendly message and the raw error details.
-        """
-
         model_msg = f"Model {self._model} not found" if self._model else "You have no model set"
         messages = {
             "auth_failed": "Your API key is invalid or expired. Please check your configuration settings.",
@@ -50,16 +35,9 @@ class APIClient():
             "unknown": "An unexpected error occurred. If this persists, please contact support.",
             "not_connected": "The AI service is not connected. Please check your connection settings."
         }
-
-        # Fallback to a generic message if the key isn't found
-        base_msg = messages.get(error_type, messages["unknown"])
-
-        result = {"message": base_msg}
-        
-        # Always include raw error details if available - the frontend can decide how to display
+        result = {"message": messages.get(error_type, messages["unknown"])}
         if exception:
             result["raw_error"] = str(exception)
-
         return result
 
     async def connect(self):
@@ -84,15 +62,12 @@ class APIClient():
             await self._AI.models.list()
 
         except openai.BadRequestError as e:
-            # Check if the error message specifically mentions the model is not found
             error_str = str(e).lower()
             if "model" in error_str and ("not found" in error_str or "missing" in error_str):
                 core.log_error("Model not found (400)", e)
                 return {"error": "model_not_found", **self._get_user_friendly_message("model_not_found", e)}
-            else:
-                # It's a different kind of 400 error (e.g., invalid parameters)
-                core.log_error("Bad request (400)", e)
-                return {"error": "api_error", **self._get_user_friendly_message("api_error", e)}
+            core.log_error("Bad request (400)", e)
+            return {"error": "api_error", **self._get_user_friendly_message("api_error", e)}
 
         except openai.AuthenticationError as e:
             await self.disconnect()
@@ -100,7 +75,6 @@ class APIClient():
             self._connection_error = error_info["message"]
             core.log("API", f"Authentication failed: {e}")
             return False
-
         except openai.APIConnectionError as e:
             await self.disconnect()
             error_info = self._get_user_friendly_message("connection_lost", e)
@@ -117,7 +91,10 @@ class APIClient():
         self.connected = True
         self._connection_error = None
         self._connection_attempts = 0
-        self.supports_developer_role = await self._check_developer_role_support(self._AI)
+
+        self.supports_developer_role = False
+        if bool(api_config.get("check_developer_role_support", False)):
+            self.supports_developer_role = await self._check_developer_role_support(self._AI)
 
         core.log("API", "Successfully connected to AI")
         return True
@@ -125,7 +102,6 @@ class APIClient():
     def get_connection_status(self):
         api_config = core.config.get("api", {})
         model_config = core.config.get("model", {})
-
         return {
             "connected": self.connected,
             "error": self._connection_error,
@@ -138,18 +114,15 @@ class APIClient():
         }
 
     async def disconnect(self):
-        """disconnect from the API"""
         if self._httpx_client:
             await self._httpx_client.aclose()
             self._httpx_client = None
-
         self.connected = False
         self._AI = None
         core.log("API", "Disconnected from API")
         return True
 
     async def reconnect(self):
-        """disconnect and reconnect to the API"""
         await self.disconnect()
         return await self.connect()
 
@@ -158,11 +131,7 @@ class APIClient():
 
     async def _check_developer_role_support(self, client):
         try:
-            # We send a minimal request using the 'developer' role.
-            # We use a very short prompt to minimize token usage/cost.
-            response = await self._AI.chat.completions.create(
-                # send dev -> user -> dev to check for multi-dev-message support,
-                # which is what the dev role is useful for in our case
+            await self._AI.chat.completions.create(
                 model=self._model or "default",
                 messages=[
                     {"role": "developer", "content": "test"},
@@ -171,9 +140,8 @@ class APIClient():
                 ],
                 max_tokens=1
             )
-        except Exception as e:
+        except Exception:
             return False
-
         return True
 
     def set_model(self, name: str):
@@ -181,24 +149,18 @@ class APIClient():
         return self._model
 
     def get_last_error(self):
-        """returns the last connection error message"""
         return self._connection_error
 
     async def _request(self, context, tools=None, stream=False, use_thinking=True, **kwargs):
-        """send a request to the LLM and return the response object"""
-
         if not context:
-            # wtf just swallow it
             return {"error": "blank_request", "message": "tried to send a blank request for some reason"}
 
         if not self.connected:
-            # attempt to connect
             connected = await self.connect()
             if not connected:
                 return {"error": "not_connected", "message": self._connection_error}
 
         if not core.config.get("model", {}).get("use_tools"):
-            # allow switching tools off globally
             tools = None
 
         req = {
@@ -216,203 +178,142 @@ class APIClient():
             }
         }
 
-        # add kwargs to the request
         for key, value in kwargs.items():
-            if key in ("tools", "stream", "use_thinking"): continue
+            if key in ("tools", "stream", "use_thinking"):
+                continue
             req[key] = value
 
         reasoning_effort = core.config.get("model", {}).get("reasoning_effort")
         if reasoning_effort:
             req["reasoning_effort"] = reasoning_effort
 
-        # allow inserting custom request fields
         custom_fields = core.config.get("api", {}).get("custom_fields", {})
         if isinstance(custom_fields, dict):
             for key, value in custom_fields.items():
                 req[key] = value
 
         if stream:
-            # request token usage from the API
             req["stream_options"] = {"include_usage": True}
 
-        # if core.debug:
-        #     core.log("debug:request", str(req))
-
         try:
-            # check for cancellation before starting the request
             if self.cancel_request:
                 return {"error": "cancelled", **self._get_user_friendly_message("cancelled")}
 
-            # wrap the request in a way that we can check for cancellation
-            # since openai's async client doesn't natively support an abort signal
-            # easily through the high-level chat.completions.create, we use a task
-            # so we can actually cancel the task itself.
-
             request_task = asyncio.create_task(self._AI.chat.completions.create(**req))
-
-            # monitor the task and the cancel_request flag
             while not request_task.done():
                 if self.cancel_request:
                     request_task.cancel()
                     return {"error": "cancelled", **self._get_user_friendly_message("cancelled")}
                 await asyncio.sleep(0.1)
 
-            response = await request_task
+            return await request_task
 
         except openai.BadRequestError as e:
-            # Check if the error message specifically mentions the model is not found
             error_str = str(e).lower()
             if "model" in error_str and ("not found" in error_str or "missing" in error_str):
                 core.log_error("Model not found (400)", e)
                 return {"error": "model_not_found", **self._get_user_friendly_message("model_not_found", e)}
-            else:
-                # It's a different kind of 400 error (e.g., invalid parameters)
-                core.log_error("Bad request (400)", e)
-                return {"error": "api_error", **self._get_user_friendly_message("api_error", e)}
-
+            core.log_error("Bad request (400)", e)
+            return {"error": "api_error", **self._get_user_friendly_message("api_error", e)}
         except asyncio.CancelledError:
             core.log_error("request was cancelled", None)
             return {"error": "cancelled", **self._get_user_friendly_message("cancelled")}
-
         except openai.AuthenticationError as e:
             core.log_error("Authentication error", e)
             self.connected = False
             error_info = self._get_user_friendly_message("auth_failed", e)
             self._connection_error = error_info["message"]
             return {"error": "auth_failed", **error_info}
-
         except openai.APIConnectionError as e:
             core.log_error("Connection error", e)
             self.connected = False
             error_info = self._get_user_friendly_message("connection_lost", e)
             self._connection_error = error_info["message"]
             return {"error": "connection_lost", **error_info}
-
         except openai.NotFoundError as e:
             core.log_error("Model not found", e)
             return {"error": "model_not_found", **self._get_user_friendly_message("model_not_found", e)}
-
         except openai.RateLimitError as e:
             core.log_error("Rate limit exceeded", e)
             return {"error": "rate_limit", **self._get_user_friendly_message("rate_limit", e)}
-
         except openai.APIStatusError as e:
             core.log_error("API status error", e)
             return {"error": "api_error", **self._get_user_friendly_message("api_error", e)}
-
         except Exception as e:
             core.log_error("error while sending request to AI", e)
             self.connected = False
             return {"error": "unknown", **self._get_user_friendly_message("unknown", e)}
 
-        return response
-
     async def send(self, context: list, system_prompt=True, use_tools=True, tools=None, use_thinking=True, **kwargs):
-        """send a message to the LLM. returns a string or error dict"""
-
         self.cancel_request = False
-
-        # use default tools if not specified. allow overrides
         if not tools:
             tools = self.manager.tools
 
         response = await self._request(context, tools=(tools if use_tools else None), use_thinking=use_thinking, **kwargs)
-
-        # return errors if applicable
         if isinstance(response, dict) and "error" in response:
             return response
 
         try:
-            result = await self._recv(response)
-            return result
+            return await self._recv(response, use_tools=use_tools)
         except Exception as e:
             core.log_error("error while processing response from AI", e)
             return {"error": "processing_failed", **self._get_user_friendly_message("processing_failed", e)}
 
     async def send_stream(self, context: list, use_tools=True, tools=None, use_thinking=True, **kwargs):
-        """send a message to the LLM. is an iterable async generator"""
-
         self.cancel_request = False
-
-        # use default tools if not specified. allow overrides
         if not tools:
             tools = self.manager.tools
 
         response = await self._request(context, tools=(tools if use_tools else None), stream=True, use_thinking=use_thinking, **kwargs)
-
-        # return errors if applicable
         if isinstance(response, dict) and "error" in response:
             yield {"type": "error", "content": response}
             return
 
         try:
-            async for token in self._recv_stream(response):
+            async for token in self._recv_stream(response, use_tools=use_tools):
                 if self.cancel_request:
-                    # cancel the entire stream
                     break
-
-                # let the channel calling send_stream() handle token processing
                 yield token
         except Exception as e:
             core.log_error("error while sending request to AI", e)
             yield {"type": "error", "content": {"error": "stream_failed", **self._get_user_friendly_message("processing_failed", e)}}
 
     async def cancel(self):
-        """cancel a request that's been sent to the AI"""
         self.cancel_request = True
         return True
 
     async def _recv(self, response, use_tools=True):
-        """takes a response object and extracts the message from it, handling tool calls if needed"""
-
-        final_content = None
-
         try:
-            # normal non-streaming mode
             response_main = response.choices[0]
         except Exception as e:
             core.log_error("error while receiving response from AI", e)
             return {"error": "invalid_response", "message": self._get_user_friendly_message("invalid_response", e)}
 
-        reasoning_content = getattr(response_main.message, "reasoning_content", None) or \
-                            getattr(response_main.message, "reasoning", None) or ""
-
+        reasoning_content = getattr(response_main.message, "reasoning_content", None) or getattr(response_main.message, "reasoning", None) or ""
         if reasoning_content and core.debug:
             core.log("debug:reasoning", reasoning_content)
 
-        # extract message content
         final_content = response_main.message.content or ""
-
-        # handle tool calls, if any
         tool_calls = None
         if use_tools and core.config.get("model").get("use_tools", False) and response_main.message.tool_calls:
             tool_calls = [tc.model_dump(warnings=False) for tc in response_main.message.tool_calls]
 
         result = {}
-
         if final_content:
             result["content"] = final_content
         if reasoning_content:
             result["reasoning_content"] = reasoning_content
         if tool_calls:
             result["tool_calls"] = tool_calls
-
-            # role is always assistant, so we force it if for some reason its not present
             result["role"] = "assistant"
-
         return result
 
     async def _recv_stream(self, response, use_tools=True):
-        """Takes a response object and extracts the message from it, handling tool calls if needed. Streaming version."""
         final_tool_calls = []
         tool_call_buffer = {}
-        tokens = []
-        reasoning_tokens = []
-
         token_usage = None
         total_prompt_tokens = 0
         total_completion_tokens = 0
-        has_usage_data = False
         last_token_time = 0
 
         if not response:
@@ -422,149 +323,89 @@ class APIClient():
             async for chunk in response:
                 if self.cancel_request:
                     if hasattr(response, "close"):
-                        # support closing
                         await response.close()
                     return
 
-                # uncomment if trying to see token stream chunks
-                # print(chunk)
+                if hasattr(chunk, "prompt_progress") and chunk.prompt_progress is not None:
+                    yield {"type": "prompt_progress", "content": chunk.prompt_progress}
 
-                if hasattr(chunk, 'prompt_progress') and chunk.prompt_progress is not None:
-                    yield {
-                        "type": "prompt_progress",
-                        "content": chunk.prompt_progress
-                    }
-
-                # Calculate time delta for real-time stats
                 current_time = time.time()
                 delta_ms = (current_time - last_token_time) * 1000
                 last_token_time = current_time
 
-
                 if chunk.choices:
                     streamed_token = chunk.choices[0].delta
-
                     content_yield = None
 
-                    # handle content token streaming
                     if streamed_token.content:
-                        tokens.append(streamed_token.content)
                         content_yield = {"type": "content", "content": streamed_token.content}
 
-                    # handle reasoning content streaming
-                    reason_part = getattr(streamed_token, "reasoning_content", None) or \
-                                getattr(streamed_token, "reasoning", None)
-
+                    reason_part = getattr(streamed_token, "reasoning_content", None) or getattr(streamed_token, "reasoning", None)
                     if reason_part:
-                        reasoning_tokens.append(reason_part)
                         content_yield = {"type": "reasoning", "content": reason_part}
 
-                    # add timing data to the yielded token
-                    if streamed_token.content or reason_part:
-                        # Send timing data: Use native if available, otherwise calculate
-                        native_timings = getattr(chunk, 'timings', None)
+                    if content_yield:
+                        native_timings = getattr(chunk, "timings", None)
                         if native_timings:
                             content_yield["timings"] = native_timings
-
-                        else:
-                            # Fallback: Calculate tokens/s based on time between chunks
-                            if delta_ms > 1: # Only yield if significant time passed
-                                content_yield["timings"] = {
-                                    "predicted_ms": delta_ms,
-                                    "predicted_n": 1
-                                }
-
-                    # and finally, yield the content token
-                    if content_yield:
+                        elif delta_ms > 1:
+                            content_yield["timings"] = {"predicted_ms": delta_ms, "predicted_n": 1}
                         yield content_yield
 
-                    # extract tool calls, if any
                     if streamed_token.tool_calls and use_tools:
                         for tool_call in streamed_token.tool_calls:
                             index = tool_call.index
-
                             if index not in tool_call_buffer:
                                 tool_call_buffer[index] = tool_call
-                                # ensure arguments is always a string
                                 if tool_call_buffer[index].function.arguments is None:
                                     tool_call_buffer[index].function.arguments = ""
-
-                                yield {
-                                    "type": "tool_call_delta",
-                                    "tool_calls": [tool_call_buffer[index]]
-                                }
                             else:
-                                # the documentation for this was awful, so i had to use AI to figure it out
-                                # welcome to the reason i was forced to introduce AI slop to the core framework
-                                # (dont worry, i removed it by now)
-                                # thanks openAI for ruining your documentation of chat completion requests in favor of your stupid Responses API
-
-                                # it seems these properties will only show up in one chunk,
-                                # and the rest of the stream won't have them anymore..
-                                # so the AI (GLM-5) decided we should set these if they show up
-                                # and then just assume it won't happen again
-                                # i guess if it does, it just overwrites it..
                                 if tool_call.id:
                                     tool_call_buffer[index].id = tool_call.id
                                 if tool_call.function.name:
                                     tool_call_buffer[index].function.name = tool_call.function.name
-
-                                # function arguments seem to be the part that actually gets streamed
-                                # and which we must accumulate to get the full toolcall
                                 if tool_call.function.arguments:
                                     tool_call_buffer[index].function.arguments += tool_call.function.arguments
 
-                                    # the magic sauce that allows streaming toolcall arguments
-                                    yield {
-                                        "type": "tool_call_delta",
-                                        "tool_calls": [tool_call_buffer[index]]
-                                    }
+                            yield {"type": "tool_call_delta", "tool_calls": [tool_call_buffer[index]]}
 
-                # if response has usage data, save it so we can use it to show to the user and to trim context
-                if hasattr(chunk, 'usage') and chunk.usage is not None:
-                    if hasattr(chunk.usage, 'prompt_tokens'):
+                if hasattr(chunk, "usage") and chunk.usage is not None:
+                    if hasattr(chunk.usage, "prompt_tokens"):
                         total_prompt_tokens = chunk.usage.prompt_tokens
-                    if hasattr(chunk.usage, 'completion_tokens'):
+                    if hasattr(chunk.usage, "completion_tokens"):
                         total_completion_tokens = chunk.usage.completion_tokens
-                    if hasattr(chunk.usage, 'total_tokens'):
+                    if hasattr(chunk.usage, "total_tokens"):
                         token_usage = chunk.usage.total_tokens
                     elif total_prompt_tokens > 0 or total_completion_tokens > 0:
-                        # Calculate total if not provided
                         token_usage = total_prompt_tokens + total_completion_tokens
-
                     yield {"type": "token_usage", "content": token_usage, "source": "API"}
 
-                if hasattr(chunk, 'timings'):
+                if hasattr(chunk, "timings"):
                     yield {"type": "timings", "content": chunk.timings}
 
             if use_tools:
                 for index in sorted(tool_call_buffer.keys()):
-                    # filter out blank tool calls (rare model glitch)
                     tool_call = tool_call_buffer[index]
                     if not tool_call.function.name:
                         continue
-
                     final_tool_calls.append(tool_call)
 
                 if final_tool_calls and core.config.get("model").get("use_tools", False):
-                    # yield the full toolcall object as a single token to be interpreted by the function that is iterating through _recv_stream()
                     tool_call_dicts = [tc.model_dump(warnings=False) for tc in final_tool_calls]
                     yield {"type": "tool_calls", "tool_calls": tool_call_dicts}
 
         except Exception as e:
             core.log_error("error while receiving response from AI", e)
-            raise e # Re-raise so send_stream can catch it and yield the error type
+            raise e
 
     async def list_models(self):
         if not self.connected:
             return []
 
         try:
-            # get alphabetically sorted model list
             models = await self._AI.models.list()
             models_list = [model.id for model in models.data]
             models_list.sort()
-
         except Exception as e:
             core.log_error("error while retrieving model list", e)
             return []
