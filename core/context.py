@@ -204,29 +204,23 @@ class Context:
         }
 
     async def get_token_usage(self):
+        """
+        Return cached token usage for lightweight UI/status polling.
+
+        This deliberately avoids rebuilding the full prompt on page load, chat
+        switch, or periodic status checks. Accurate trimming still happens inside
+        get() immediately before sending a request to the model, and API-provided
+        usage updates this cache after real responses.
+        """
         max_tokens = core.config.get("api").get("max_context", 8192)
 
-        # First, check if we have API-provided token usage from the last response
-        if hasattr(self.chat, 'token_usage') and self.chat.token_usage > 0:
-            return {
-                "current": self.chat.token_usage,
-                "max": max_tokens
-            }
-
-        # Otherwise, calculate token usage locally
-        # we use prevent_recursion to tell the system prompt retrieval
-        # call in self.get() to not include token usage data
-
         try:
-            prompt_tokens = await self.chat.count_tokens(await self.get(system_prompt=True, prevent_recursion=True))
-        except AttributeError as e:
-            # when modules don't have a channel assigned yet, this error triggers. we handle it "gracefully".
-            return {"current": 0, "max": max_tokens}
-        except Exception as e:
-            # Return a conservative estimate on error
-            return {"current": 0, "max": max_tokens}
+            current = await self.chat.get_token_usage()
+        except Exception:
+            current = 0
 
         return {
-            "current": prompt_tokens,
-            "max": max_tokens
+            "current": current or 0,
+            "max": max_tokens,
+            "source": "cached"
         }
