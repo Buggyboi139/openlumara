@@ -267,6 +267,8 @@ class ToolcallManager:
                     "toolcall",
                     f"tried to call tool {tool_name} but couldn't find it"
                 )
+                yield await reject_tool_call(tool_call_dict, f"Tool '{tool_name}' was not found.")
+                continue
 
         if self.channel.manager.API.cancel_request:
             await self.channel.announce("toolcalling chain cancelled", "info")

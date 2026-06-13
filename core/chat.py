@@ -381,7 +381,9 @@ class Chat:
         Counts token usage locally using tiktoken (with fallback)
         """
         num_tokens = 0
-        _messages = messages or await self.channel.context.get(system_prompt=True, end_prompt=True)
+        _messages = messages
+        if _messages is None:
+            _messages = await self.get()
         if not _messages:
             return 0
 
