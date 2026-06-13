@@ -4,6 +4,9 @@ import asyncio
 import time
 import json
 import json_repair
+import base64
+import mimetypes
+import tempfile
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import BadRequest
@@ -18,7 +21,9 @@ class Telegram(core.channel.Channel):
         "stream_tool_calls": False,
         "show_reasoning": False,
         "announce_startup": False,
-        "announce_shutdown": False
+        "announce_shutdown": False,
+        "image_prompt": "Describe this image.",
+        "max_image_size_mb": 20
     }
 
     async def run(self):
@@ -60,6 +65,13 @@ class Telegram(core.channel.Channel):
             self.app.add_handler(MessageHandler(filters.TEXT, self._tg_message))
             self.app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self._tg_message))
 
+            image_filters = filters.PHOTO
+            try:
+                image_filters = image_filters | filters.Document.IMAGE
+            except AttributeError:
+                pass
+            self.app.add_handler(MessageHandler(image_filters, self._tg_message))
+
             await self.app.initialize()
             await self.app.start()
             await self.app.updater.start_polling(drop_pending_updates=True)
@@ -95,11 +107,11 @@ class Telegram(core.channel.Channel):
             await self.app.shutdown()
 
     async def on_shutdown(self):
+        self.running = False
+        self._shutting_down = True
         if self.config.get("announce_shutdown"):
             await self.announce("Shutting down Telegram channel...", "status")
-            self.running = False
-            self._shutting_down = True
-            return True
+        return True
 
     async def _tg_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -114,6 +126,19 @@ class Telegram(core.channel.Channel):
 
     def _voice_module(self):
         return self.manager.modules.get("voice")
+
+    def _image_limit_bytes(self):
+        try:
+            max_mb = float(self.config.get("max_image_size_mb", default=20))
+        except Exception:
+            max_mb = 20
+        return int(max_mb * 1024 * 1024)
+
+    def _image_prompt(self):
+        prompt = self.config.get("image_prompt", default="Describe this image.")
+        if not prompt:
+            prompt = "Describe this image."
+        return str(prompt)
 
     async def _download_telegram_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE, voice_mod) -> str:
         message = update.message
@@ -131,11 +156,80 @@ class Telegram(core.channel.Channel):
         await tg_file.download_to_drive(custom_path=local_path)
         return local_path
 
+    def _get_telegram_image_object(self, update: Update):
+        message = update.message
+        if not message:
+            return None, None, None
+
+        if message.photo:
+            photo = message.photo[-1]
+            return photo, "telegram_photo.jpg", "image/jpeg"
+
+        document = message.document
+        if document:
+            mime_type = document.mime_type or ""
+            filename = document.file_name or "telegram_image"
+            guessed_mime, _ = mimetypes.guess_type(filename)
+            mime_type = mime_type or guessed_mime or "application/octet-stream"
+            if mime_type.startswith("image/"):
+                return document, filename, mime_type
+
+        return None, None, None
+
+    async def _build_telegram_image_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        image_obj, filename, mime_type = self._get_telegram_image_object(update)
+        if not image_obj:
+            return None
+
+        file_size = getattr(image_obj, "file_size", None)
+        max_size = self._image_limit_bytes()
+        if file_size and file_size > max_size:
+            raise ValueError(f"Image is too large ({file_size} bytes). Max is {max_size} bytes.")
+
+        suffix = os.path.splitext(filename or "")[1]
+        if not suffix:
+            suffix = mimetypes.guess_extension(mime_type) or ".jpg"
+
+        local_path = None
+        try:
+            tg_file = await context.bot.get_file(image_obj.file_id)
+            with tempfile.NamedTemporaryFile(prefix="telegram_image_", suffix=suffix, delete=False) as tmp:
+                local_path = tmp.name
+
+            await tg_file.download_to_drive(custom_path=local_path)
+
+            actual_size = os.path.getsize(local_path)
+            if actual_size > max_size:
+                raise ValueError(f"Image is too large ({actual_size} bytes). Max is {max_size} bytes.")
+
+            with open(local_path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+
+            caption = (update.message.caption or "").strip()
+            prompt = caption or self._image_prompt()
+            data_url = f"data:{mime_type};base64,{encoded}"
+
+            return {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{prompt}\n\n[Image: {filename}]"},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]
+            }
+        finally:
+            if local_path:
+                try:
+                    os.remove(local_path)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    core.log("telegram", f"Failed to clean up temp image: {e}")
+
     async def _tg_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         Routes incoming messages:
         - Commands (/stop, /help) -> Process immediately (concurrently).
-        - Normal text and transcribed voice -> Add to queue (sequentially).
+        - Normal text, transcribed voice, and images -> Add to queue (sequentially).
         """
         if not update.message:
             return
@@ -149,14 +243,29 @@ class Telegram(core.channel.Channel):
             self.auth_storage.set(str(chat_id))
 
         is_voice_message = bool(update.message.voice or update.message.audio)
-        text = (update.message.text or "").strip()
+        is_image_message = bool(update.message.photo or update.message.document)
+        text = (update.message.text or update.message.caption or "").strip()
+        user_payload = text
+
+        if is_image_message:
+            image_payload = None
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+                image_payload = await self._build_telegram_image_message(update, context)
+            except Exception as e:
+                core.log("telegram", f"Image message failed: {e}")
+                await update.message.reply_text(f"Image message failed: {e}")
+                return
+
+            if image_payload:
+                await self.message_queue.put((update, context, image_payload, False))
+            return
 
         if is_voice_message:
             voice_mod = self._voice_module()
             if not voice_mod or not voice_mod.telegram_transcribe_enabled():
                 await update.message.reply_text("Voice input is not enabled. Enable the voice module and its Telegram STT setting.")
                 return
-
             local_path = None
             try:
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -169,6 +278,7 @@ class Telegram(core.channel.Channel):
                 if not text:
                     await update.message.reply_text("No speech detected.")
                     return
+                user_payload = text
             except Exception as e:
                 core.log("telegram", f"Voice message failed: {e}")
                 await update.message.reply_text(f"Voice message failed: {e}")
@@ -177,19 +287,15 @@ class Telegram(core.channel.Channel):
                 if local_path and voice_mod:
                     voice_mod.cleanup_file(local_path)
 
-        if not text:
+        if not user_payload:
             return
 
         cmd_prefix = core.config.get("core").get("cmd_prefix", "/")
 
-        # Check if it is a command
-        if not is_voice_message and text.startswith(cmd_prefix):
-            # Execute commands immediately in a separate task to allow interruption
-            # This allows /stop to cancel an ongoing stream processed by the queue worker
-            asyncio.create_task(self._process_stream(update, context, user_msg=text, was_voice_message=False))
+        if not is_voice_message and isinstance(user_payload, str) and user_payload.startswith(cmd_prefix):
+            asyncio.create_task(self._process_stream(update, context, user_msg=user_payload, was_voice_message=False))
         else:
-            # Queue normal messages for sequential processing
-            await self.message_queue.put((update, context, text, is_voice_message))
+            await self.message_queue.put((update, context, user_payload, is_voice_message))
 
     async def _process_queue_worker(self):
         """
@@ -198,26 +304,23 @@ class Telegram(core.channel.Channel):
         """
         while self.running and not self._shutting_down:
             try:
-                # Wait for a message from the queue
                 item = await self.message_queue.get()
                 if len(item) == 4:
-                    update, context, user_msg, was_voice_message = item
+                    update, context, user_payload, was_voice_message = item
                 else:
                     update, context = item
-                    user_msg = update.message.text.strip()
+                    user_payload = (update.message.text or update.message.caption or "").strip()
                     was_voice_message = False
 
                 chat_id = update.effective_chat.id
-
-                # Start typing indicator before generating response
                 typing_task = asyncio.create_task(self._keep_typing(chat_id))
 
                 try:
                     if self.config.get("use_message_streaming"):
-                        # Process the message (this waits for the stream to finish)
-                        await self._process_stream(update, context, user_msg=user_msg, was_voice_message=was_voice_message)
+                        await self._process_stream(update, context, user_msg=user_payload, was_voice_message=was_voice_message)
                     else:
-                        response = await self.send({"role": "user", "content": user_msg})
+                        message_payload = user_payload if isinstance(user_payload, dict) else {"role": "user", "content": user_payload}
+                        response = await self.send(message_payload)
                         if response:
                             content = response.get("content")
                             if content:
@@ -225,34 +328,31 @@ class Telegram(core.channel.Channel):
                 except Exception as e:
                     core.log("telegram", f"Error in queue worker processing: {e}")
                 finally:
-                    # Stop typing indicator
                     if not typing_task.done():
                         typing_task.cancel()
                         try:
                             await typing_task
                         except asyncio.CancelledError:
                             pass
-                    # Mark the task as done
                     self.message_queue.task_done()
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 core.log("telegram", f"Queue worker error: {e}")
-                await asyncio.sleep(1) # Prevent tight loop on error
+                await asyncio.sleep(1)
 
-    async def _process_stream(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_msg: str | None = None, was_voice_message: bool = False):
+    async def _process_stream(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user_msg: str | dict | None = None, was_voice_message: bool = False):
         """
         Contains the logic for streaming AI responses to the user.
         """
         chat_id = update.effective_chat.id
         if user_msg is None:
-            user_msg = (update.message.text or "").strip()
+            user_msg = (update.message.text or update.message.caption or "").strip()
 
-        # 1. Start Typing Indicator
+        message_payload = user_msg if isinstance(user_msg, dict) else {"role": "user", "content": user_msg}
+
         typing_task = asyncio.create_task(self._keep_typing(chat_id))
-
-        # Pre-send a message like Discord does
         initial_msg = await context.bot.send_message(chat_id, "processing your request...")
 
         class StreamState:
@@ -279,10 +379,8 @@ class Telegram(core.channel.Channel):
         editor_task = asyncio.create_task(periodic_editor())
 
         try:
-            # 2. Consume the stream
-            # Use a chunk size similar to Discord's MAX_CHARS
             stream = self.format_stream_for_text(
-                self.send_stream({"role": "user", "content": user_msg}), 
+                self.send_stream(message_payload),
                 use_markdown=False,
                 chunk_size=1900
             )
@@ -290,13 +388,12 @@ class Telegram(core.channel.Channel):
             async for token in stream:
                 if token.get("type") == "new_chunk":
                     async with edit_lock:
-                        # Finalize current message
                         if state.message_obj:
                             try:
                                 await state.message_obj.edit_text(state.full_content[:4000])
-                            except: pass
-                        
-                        # Start new message
+                            except Exception:
+                                pass
+
                         state.message_obj = await context.bot.send_message(chat_id, "...")
                         state.full_content = ""
                     continue
@@ -309,16 +406,17 @@ class Telegram(core.channel.Channel):
                     state.full_content += content
                     state.all_content += content
 
-            # 3. Finalize
             async with edit_lock:
                 if state.message_obj:
                     try:
                         await state.message_obj.edit_text(state.full_content[:4000])
-                    except: pass
+                    except Exception:
+                        pass
                 elif state.full_content:
                     try:
                         await context.bot.send_message(chat_id, state.full_content[:4000])
-                    except: pass
+                    except Exception:
+                        pass
 
             if state.all_content:
                 await self._send_voice_reply_if_enabled(context.bot, chat_id, state.all_content, was_voice_message)
@@ -327,7 +425,7 @@ class Telegram(core.channel.Channel):
             core.log("telegram", f"Error processing stream: {e}")
             try:
                 await context.bot.send_message(chat_id, f"❌ Error: {str(e)}")
-            except:
+            except Exception:
                 pass
         finally:
             state.is_running = False
@@ -399,7 +497,7 @@ class Telegram(core.channel.Channel):
             return
 
         max_length = 4000
-        
+
         if len(text) <= max_length:
             try:
                 await bot.send_message(chat_id, text, parse_mode="Markdown")
@@ -415,14 +513,13 @@ class Telegram(core.channel.Channel):
             if len(text) <= max_length:
                 chunks.append(text)
                 break
-            
-            # Try to split at a newline or space within the limit
+
             split_idx = text.rfind('\n', 0, max_length)
             if split_idx == -1:
                 split_idx = text.rfind(' ', 0, max_length)
             if split_idx == -1:
                 split_idx = max_length
-            
+
             chunks.append(text[:split_idx].strip())
             text = text[split_idx:].strip()
 
@@ -443,13 +540,4 @@ class Telegram(core.channel.Channel):
         core.log("telegram", content)
 
         if self.authorized_chat_id and self.app:
-            # emoji_map = {
-            #     "error": "🚨",
-            #     "warning": "⚠️",
-            #     "status": "ℹ️",
-            #     "info": "💬"
-            # }
-            # emoji = emoji_map.get(type, "🔔")
-            # safe_msg = content.replace("*", "").replace("_", "")
-            # text = f"{emoji} *{type.upper()}:* {safe_msg}"
             asyncio.create_task(self._send_telegram_message(content))
