@@ -298,7 +298,8 @@ class SandboxedShell(core.module.Module):
         if self.container_name and self.runtime:
             core.log("sandbox_shell", f"Shutting down persistent container {self.container_name}...")
             try:
-                await self._run_async_cmd([self.runtime, 'rm', '-f', self.container_name], timeout=10.0, limit=1024)
+                await self._kill_container()
+                self.container_name = None
                 core.log("sandbox_shell", "Container removed.")
             except Exception as e:
                 core.log("sandbox_shell", f"Error during container shutdown: {e}")
