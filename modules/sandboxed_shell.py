@@ -152,9 +152,9 @@ class SandboxedShell(core.module.Module):
             # Start the container in detached mode
             await self._run_async_cmd(cmd, timeout=5)
             
-            # Wait for container to finish with proper timeout
+            # Wait for container to finish and capture the exit code
             try:
-                await asyncio.wait_for(
+                stdout_wait, stderr_wait, exit_code = await asyncio.wait_for(
                     self._run_async_cmd([self.runtime, 'wait', self.container_name], timeout=timeout),
                     timeout=timeout
                 )
@@ -174,8 +174,7 @@ class SandboxedShell(core.module.Module):
             return self.result({
                 "stdout": stdout_text,
                 "stderr": stderr_text,
-                "exit_code": 0,
-                "data_dir": "/data"
+                "exit_code": exit_code
             })
 
         except Exception as e:
@@ -206,12 +205,16 @@ class SandboxedShell(core.module.Module):
 
             stdout = content.get("stdout", "")
             stderr = content.get("stderr", "")
+            exit_code = content.get("exit_code", 0)
 
             output = stdout
             if stderr:
                 output += "\n" + stderr
 
-            return output if output else "BLANK"
+            if exit_code != 0:
+                return output if output else f"Command failed with exit code {exit_code}"
+            
+            return output if output else "NO OUTPUT"
         except Exception as e:
             return f"error while running sandboxed shell command: {e}"
 
