@@ -23,7 +23,8 @@ class Telegram(core.channel.Channel):
         "announce_startup": False,
         "announce_shutdown": False,
         "image_prompt": "Describe this image.",
-        "max_image_size_mb": 20
+        "max_image_size_mb": 20,
+        "image_download_timeout": 60
     }
 
     async def run(self):
@@ -36,10 +37,8 @@ class Telegram(core.channel.Channel):
 
         self.app = None
 
-        # Initialize StorageText to handle the authorized chat ID
         self.auth_storage = core.storage.StorageText("telegram_chat_id")
 
-        # Load the stored chat ID from disk
         stored_id = self.auth_storage.get()
         self.authorized_chat_id = None
         if stored_id and stored_id.strip():
@@ -50,8 +49,6 @@ class Telegram(core.channel.Channel):
                 core.log("telegram", "Failed to parse stored chat ID.")
 
         self._shutting_down = False
-
-        # Queue for sequential processing of standard messages
         self.message_queue = asyncio.Queue()
         self.queue_task = None
 
@@ -77,8 +74,6 @@ class Telegram(core.channel.Channel):
             await self.app.updater.start_polling(drop_pending_updates=True)
 
             self.running = True
-
-            # Start the queue processor worker
             self.queue_task = asyncio.create_task(self._process_queue_worker())
 
             if self.config.get("announce_startup"):
@@ -91,7 +86,6 @@ class Telegram(core.channel.Channel):
             core.log("telegram", f"Critical Error: {str(e)}")
             return False
         finally:
-            # Clean up the queue task
             if self.queue_task:
                 self.queue_task.cancel()
             await self._cleanup()
@@ -140,6 +134,45 @@ class Telegram(core.channel.Channel):
             prompt = "Describe this image."
         return str(prompt)
 
+    def _image_timeout(self):
+        try:
+            timeout = float(self.config.get("image_download_timeout", default=60))
+        except Exception:
+            timeout = 60
+        return max(5, timeout)
+
+    def _telegram_timeout_kwargs(self):
+        timeout = self._image_timeout()
+        return {
+            "read_timeout": timeout,
+            "write_timeout": timeout,
+            "connect_timeout": timeout,
+            "pool_timeout": timeout
+        }
+
+    async def _safe_send_chat_action(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, action: str):
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=action, **self._telegram_timeout_kwargs())
+        except TypeError:
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action=action)
+            except Exception as e:
+                core.log("telegram", f"Ignoring chat action failure: {e}")
+        except Exception as e:
+            core.log("telegram", f"Ignoring chat action failure: {e}")
+
+    async def _bot_get_file(self, context: ContextTypes.DEFAULT_TYPE, file_id: str):
+        try:
+            return await context.bot.get_file(file_id, **self._telegram_timeout_kwargs())
+        except TypeError:
+            return await context.bot.get_file(file_id)
+
+    async def _download_file_to_drive(self, tg_file, local_path: str):
+        try:
+            await tg_file.download_to_drive(custom_path=local_path, **self._telegram_timeout_kwargs())
+        except TypeError:
+            await tg_file.download_to_drive(custom_path=local_path)
+
     async def _download_telegram_audio(self, update: Update, context: ContextTypes.DEFAULT_TYPE, voice_mod) -> str:
         message = update.message
         audio_obj = message.voice or message.audio
@@ -150,10 +183,10 @@ class Telegram(core.channel.Channel):
         if duration and duration > voice_mod.max_audio_seconds():
             raise ValueError(f"Voice message is too long ({duration}s). Max is {voice_mod.max_audio_seconds()}s.")
 
-        tg_file = await context.bot.get_file(audio_obj.file_id)
+        tg_file = await self._bot_get_file(context, audio_obj.file_id)
         ext = ".ogg" if message.voice else os.path.splitext(getattr(message.audio, "file_name", "") or "")[1] or ".audio"
         local_path = voice_mod._new_temp_path(ext)
-        await tg_file.download_to_drive(custom_path=local_path)
+        await self._download_file_to_drive(tg_file, local_path)
         return local_path
 
     def _get_telegram_image_object(self, update: Update):
@@ -192,11 +225,12 @@ class Telegram(core.channel.Channel):
 
         local_path = None
         try:
-            tg_file = await context.bot.get_file(image_obj.file_id)
+            core.log("telegram", f"Downloading image {filename} ({mime_type})")
+            tg_file = await self._bot_get_file(context, image_obj.file_id)
             with tempfile.NamedTemporaryFile(prefix="telegram_image_", suffix=suffix, delete=False) as tmp:
                 local_path = tmp.name
 
-            await tg_file.download_to_drive(custom_path=local_path)
+            await self._download_file_to_drive(tg_file, local_path)
 
             actual_size = os.path.getsize(local_path)
             if actual_size > max_size:
@@ -208,6 +242,7 @@ class Telegram(core.channel.Channel):
             caption = (update.message.caption or "").strip()
             prompt = caption or self._image_prompt()
             data_url = f"data:{mime_type};base64,{encoded}"
+            core.log("telegram", f"Built image payload from {filename}: {actual_size} bytes, caption={bool(caption)}")
 
             return {
                 "role": "user",
@@ -250,11 +285,11 @@ class Telegram(core.channel.Channel):
         if is_image_message:
             image_payload = None
             try:
-                await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+                await self._safe_send_chat_action(context, chat_id, "upload_photo")
                 image_payload = await self._build_telegram_image_message(update, context)
             except Exception as e:
-                core.log("telegram", f"Image message failed: {e}")
-                await update.message.reply_text(f"Image message failed: {e}")
+                core.log("telegram", f"Image message failed: {type(e).__name__}: {e}")
+                await update.message.reply_text(f"Image message failed: {type(e).__name__}: {e}")
                 return
 
             if image_payload:
@@ -268,7 +303,7 @@ class Telegram(core.channel.Channel):
                 return
             local_path = None
             try:
-                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                await self._safe_send_chat_action(context, chat_id, "typing")
                 local_path = await self._download_telegram_audio(update, context, voice_mod)
                 result = await voice_mod.transcribe_for_chat(local_path)
                 if result.get("status") != "success":
