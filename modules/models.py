@@ -1,7 +1,7 @@
 import core
 
 class Models(core.module.Module):
-    """Lets you or the AI switch between AI models"""
+    """Lets you switch between AI models"""
 
     settings = {
         "insert_current_model_into_system_prompt": {
@@ -9,7 +9,11 @@ class Models(core.module.Module):
             "default": True
         },
         "insert_available_models_into_system_prompt": {
-            "description": "Whether to make the AI aware of what models are available for it to switch to. Allows you to simply ask the AI to switch to whatever model you want (example: `switch to Qwen3.5-9B`) and it'll just do it ",
+            "description": "Whether to make the AI aware of what models are available. This is off by default to reduce prompt bloat.",
+            "default": False
+        },
+        "allow_ai_model_switching": {
+            "description": "Whether the AI is allowed to switch models using a tool call. The /model command still works when this is disabled.",
             "default": False
         }
     }
@@ -21,6 +25,9 @@ class Models(core.module.Module):
         if self.config.get("insert_available_models_into_system_prompt"):
             self.disabled_tools.append("get_available")
 
+        if not self.config.get("allow_ai_model_switching"):
+            self.disabled_tools.append("switch")
+
     async def on_system_prompt(self):
         output = ""
 
@@ -29,7 +36,7 @@ class Models(core.module.Module):
             output += f"Current model: {current_model}"
 
         current_model = self.manager.API.get_model()
-        
+
         if self.config.get("insert_available_models_into_system_prompt"):
             if not self.models:
                 models = await self.manager.API.list_models()
@@ -38,8 +45,10 @@ class Models(core.module.Module):
                 self.models = models
 
             if len(self.models) > 1:
-                output += f"\n\nModels you can switch to using the models_switch() toolcall: "
+                output += "\n\nAvailable models: "
                 output += ", ".join(self.models)
+                if self.config.get("allow_ai_model_switching"):
+                    output += "\nOnly switch models when the latest user message explicitly asks you to switch models."
         else:
             self._header = "current model"
             output = current_model
@@ -83,7 +92,7 @@ class Models(core.module.Module):
         return "\n".join(self.models)+"\n\nUse `/model <name>` to switch to your model of choice"
 
     async def switch(self, name: str):
-        """Switches you to a different AI model"""
+        """Switches to a different AI model. Only use this tool when the latest user message explicitly asks to switch models."""
         if not self.models:
             models = await self.manager.API.list_models()
             if not models:
@@ -106,4 +115,3 @@ class Models(core.module.Module):
         self.manager.API.set_model(found_id)
 
         return f"model has been switched to {found_id}"
-
