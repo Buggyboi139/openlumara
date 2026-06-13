@@ -328,7 +328,9 @@ async function init() {
 
         initSettingsModuleSubnav();
         loadTheme();
-        loadChats();
+        if (!currentChatId) {
+            loadChats();
+        }
         initTagFilterState();
         initSettingsGroupCollapse();
 
