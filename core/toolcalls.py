@@ -136,7 +136,10 @@ class ToolcallManager:
             # and store the instance and name of that module
             for module_name, module_obj in self.channel.manager.modules.items():
                 class_display_name = core.modules.get_name(module_obj)
-                translated_tool_name = tool_name.replace(f"{class_display_name}_", "")
+
+                # remove the module name from the tool name
+                module_identifier = f"{class_display_name}_"
+                translated_tool_name = tool_name[len(module_identifier):]
 
                 if hasattr(module_obj, translated_tool_name):
                     module_instance = module_obj
@@ -145,9 +148,8 @@ class ToolcallManager:
 
             if module_instance:
                 # remove the module name from the tool name
-                translated_tool_name = tool_name.replace(
-                    f"{module_instance_display_name}_", ""
-                ).strip()
+                module_identifier = f"{module_instance_display_name}_"
+                translated_tool_name = tool_name[len(module_identifier):]
 
                 if (
                     tool_name not in self.channel.manager.tool_names
