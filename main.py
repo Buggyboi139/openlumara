@@ -73,7 +73,7 @@ async def main_loop(arg_list):
     manager = core.manager.Manager(cmdline_args=args)
     # run main loop
     result = await manager.run()
-    manager = None # wipe it all
+    del(manager) # wipe it all
     return result
 
 def run_from_args(arg_list: list = []):
