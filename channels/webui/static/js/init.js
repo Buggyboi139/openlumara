@@ -55,13 +55,200 @@ function connectWebSocket() {
 }
 
 function scheduleWsReconnect() {
-    const delay = 100;
     console.log(`attempting to reconnect to websocket..`);
-    setTimeout(connectWebSocket, delay);
+    setTimeout(connectWebSocket, 1000);
+}
+
+function handlePromptProgress(prog) {
+    if (!prog || typeof prog !== 'object') return;
+
+    const cache = prog.cache || 0;
+    const processed = prog.processed - cache;
+    const total = prog.total - cache;
+    const percent = total > 0 ? Math.round((processed / total) * 100) : 0;
+    const elapsed = prog.time_ms / 1000;
+    const remaining = (total - processed) > 0 ? (elapsed / processed) * (total - processed) : 0;
+
+    // Update Tool Processing Indicator if it exists
+    if (typeof toolProcessingIndicatorElement !== 'undefined' && toolProcessingIndicatorElement && toolProcessingIndicatorElement.updateProgress) {
+        toolProcessingIndicatorElement.updateProgress(percent);
+    }
+
+    // Update progress bar and text
+    if (typeof progressBarFill !== 'undefined' && progressBarFill) {
+        progressBarFill.style.width = `${percent}%`;
+    }
+    if (typeof progressTextPercent !== 'undefined' && progressTextPercent && typeof progressTextETA !== 'undefined' && progressTextETA) {
+        progressTextPercent.textContent = `${percent}%`;
+        progressTextETA.textContent = `(ETA: ${Math.ceil(remaining)}s)`;
+    }
 }
 
 function handleWebSocketMessage(data) {
     // Handle typed messages from backend
+    if (data.type === 'sync_state') {
+        // Sync handshake: restore active chat and buffer
+        if (data.active_chat_id) {
+            switchChat(data.active_chat_id, true);
+        }
+        if (data.buffer) {
+            // Append buffer to current message if streaming
+            if (typeof appendStreamText === 'function') {
+                appendStreamText(data.buffer);
+            }
+            if (typeof renderStreamSegments === 'function' && window._currentAiMsgDiv) {
+                renderStreamSegments(window._currentAiMsgDiv);
+            }
+        }
+        return;
+    }
+    if (data.type === 'chat_switched') {
+        // Force switch chat on all devices
+        loadChat(data.chat_id);
+        // Clear buffer if empty
+        if (!data.buffer || data.buffer.length === 0) {
+            if (typeof resetStreamState === 'function') resetStreamState();
+            window._streamInitialized = false;
+        } else {
+            if (typeof appendStreamText === 'function') {
+                appendStreamText(data.buffer.join(''));
+            }
+            if (typeof renderStreamSegments === 'function' && window._currentAiMsgDiv) {
+                renderStreamSegments(window._currentAiMsgDiv);
+            }
+        }
+        return;
+    }
+    if (data.type === 'token') {
+        // Real-time token broadcasting
+        if (!window._currentAiMsgDiv) return; // Wait for send() to set up UI
+        
+        // Insert AI wrapper if not already inserted
+        if (window._currentAiWrapper && !window._currentAiWrapper.parentNode) {
+            chat.insertBefore(window._currentAiWrapper, typing);
+        }
+
+        // Extract token type and content correctly
+        let tokenType = 'content';
+        let tokenContent = '';
+        
+        if (data.message) {
+            tokenType = data.message.type || 'content';
+            tokenContent = data.message.content || '';
+        } else if (data.content) {
+            tokenContent = data.content;
+        }
+
+        // Remove progress indicator when first token arrives
+        if (fancyProcessingIndicator && (tokenType === 'content' || tokenType === 'reasoning')) {
+            fancyProcessingIndicator.remove();
+            fancyProcessingIndicator = null;
+            if (typing) typing.style.display = '';
+        }
+
+        // Handle prompt progress
+        if (tokenType === 'prompt_progress' && tokenContent) {
+            if (typeof handlePromptProgress === 'function') {
+                handlePromptProgress(tokenContent);
+            }
+            return;
+        }
+
+        if (tokenType === 'reasoning' && tokenContent) {
+            if (typeof appendStreamText === 'function') {
+                appendStreamText(tokenType, tokenContent, false);
+            }
+            if (typeof renderStreamSegments === 'function') {
+                renderStreamSegments(window._currentAiMsgDiv);
+            }
+            if (window._currentUseStreamingSound) {
+                TypewriterAudioManager.play('token');
+            }
+            updateStopButtonState();
+        } else if (tokenType === 'content' && tokenContent) {
+            if (typeof appendStreamText === 'function') {
+                appendStreamText(tokenType, tokenContent, window._currentUseTypewriter);
+            }
+            if (window._currentUseTypewriter) {
+                // Manually queue characters for typewriter mode
+                if (typeof activeTypewriterSegId !== 'undefined' && activeTypewriterSegId !== -1) {
+                    const activeSeg = streamSegments.find(s => s.id === activeTypewriterSegId);
+                    if (activeSeg && activeSeg.type === 'content') {
+                        for (const char of tokenContent) {
+                            typewriterQueue.push({ segId: activeSeg.id, char });
+                        }
+                        if (typeof isTypewriterRunning === 'undefined' || !isTypewriterRunning) {
+                            if (typeof startTypewriterProcessSegments === 'function') {
+                                startTypewriterProcessSegments(window._currentAiMsgDiv);
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (typeof renderStreamSegments === 'function') {
+                    renderStreamSegments(window._currentAiMsgDiv);
+                }
+                if (window._currentUseStreamingSound) {
+                    TypewriterAudioManager.play('token');
+                }
+            }
+            updateStopButtonState();
+        } else if (tokenType === 'tool_call_delta') {
+            // Handle tool call deltas
+            if (typeof ensureToolCallsSegment === 'function') {
+                ensureToolCallsSegment();
+            }
+            if (typeof handleToolCallDelta === 'function') {
+                handleToolCallDelta(data.message, window._currentAiMsgDiv, window._currentAiWrapper);
+            }
+            if (window._currentUseStreamingSound && !window._currentUseTypewriter) {
+                TypewriterAudioManager.play('token');
+            }
+            updateStopButtonState();
+        } else if (tokenType === 'tool_calls') {
+            // Handle completed tool calls
+            if (typeof finalizeStreamingToolCalls === 'function') {
+                finalizeStreamingToolCalls(data.message.tool_calls || [], window._currentAiMsgDiv);
+            }
+            if (typeof TypewriterAudioManager !== 'undefined') {
+                TypewriterAudioManager.stopProcessingSound();
+            }
+            updateStopButtonState();
+        } else if (tokenType === 'tool') {
+            // Handle tool responses
+            if (typeof handleToolResponse === 'function') {
+                handleToolResponse(data.message, window._currentAiMsgDiv);
+            }
+            if (typeof TypewriterAudioManager !== 'undefined') {
+                TypewriterAudioManager.playProcessingSound();
+            }
+            updateStopButtonState();
+        }
+        return;
+    }
+    if (data.type === 'stream_complete') {
+        // Signal end of streaming
+        isDataStreaming = false; // Mark stream as complete
+        updateStopButtonState(); // Update button state immediately
+        
+        // Wait for typewriter to finish if it's still running
+        if (typeof isTypewriterRunning === 'undefined' || !isTypewriterRunning) {
+            if (typeof finalizeStreamingUI === 'function' && window._currentAiWrapper) {
+                finalizeStreamingUI(window._currentAiWrapper, window._currentAiMsgDiv);
+            }
+        } else {
+            // If typewriter is running, wait for it to finish before finalizing
+            if (typeof waitForTypewriter === 'function') {
+                waitForTypewriter().then(() => {
+                    if (typeof finalizeStreamingUI === 'function' && window._currentAiWrapper) {
+                        finalizeStreamingUI(window._currentAiWrapper, window._currentAiMsgDiv);
+                    }
+                });
+            }
+        }
+        window._streamInitialized = false;
+        return;
+    }
     if (data.type === 'message_added') {
         handleNewMessage(data.message);
         return;
@@ -95,6 +282,12 @@ function handleWebSocketMessage(data) {
         // show system logs
         closeModal('settings');
         showModal('log', true);
+    }
+    if (data.type === 'error') {
+        if (typeof handleServerError === 'function') {
+            handleServerError(data.error);
+        }
+        return;
     }
     // Legacy: handle raw message objects (for backwards compatibility)
     // Add an index if missing to ensure proper handling

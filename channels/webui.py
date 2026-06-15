@@ -92,6 +92,11 @@ class ConnectionManager:
         self.log_buffer: List[dict] = []  # Store all log messages
         self.max_log_buffer = 1000  # Keep last 1000 logs
 
+        # Global State for Unified Experience
+        self.active_chat_id: Optional[str] = None
+        self.stream_buffer: List[str] = []  # Accumulates tokens for the current stream
+        self.active_stream_task: Optional[asyncio.Task] = None
+
     async def connect(self, websocket: WebSocket, user: str = "anonymous"):
         await websocket.accept()
         self.active_connections.append(websocket)
@@ -104,18 +109,31 @@ class ConnectionManager:
                 "logs": self.log_buffer
             })
 
+        # Send global state sync if active
+        if self.active_chat_id:
+            await websocket.send_json({
+                "type": "sync_state",
+                "active_chat_id": self.active_chat_id,
+                "buffer": "".join(self.stream_buffer)
+            })
+
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
         self.connection_users.pop(websocket, None)
 
     async def broadcast(self, message: dict):
+        disconnected = []
         for connection in self.active_connections:
             try:
                 if connection.client_state == WebSocketState.CONNECTED:
                     await connection.send_json(message)
             except Exception:
-                pass
+                disconnected.append(connection)
+        
+        # Clean up any dead connections
+        for conn in disconnected:
+            self.disconnect(conn)
 
     def add_log(self, category: str, message: str):
         """Add a log entry to the buffer"""
@@ -126,6 +144,78 @@ class ConnectionManager:
         # Keep only the last N entries
         if len(self.log_buffer) > self.max_log_buffer:
             self.log_buffer = self.log_buffer[-self.max_log_buffer:]
+
+    async def start_background_stream(self, chat_id: str, generator: Any):
+        """Start a detached background task for streaming that broadcasts tokens immediately."""
+        # Cancel any existing stream
+        if self.active_stream_task and not self.active_stream_task.done():
+            self.active_stream_task.cancel()
+
+        self.active_chat_id = chat_id
+        self.stream_buffer = []
+        
+        async def stream_worker():
+            try:
+                async for token_data in generator:
+                    if isinstance(token_data, dict):
+                        p_type = token_data.get("type")
+                        status_str = "idle"
+                        if p_type == "reasoning": status_str = "thinking"
+                        elif p_type == "content": sttus_str = "content"
+                        elif p_type in ["tool_call_delta", "tool", "tool_calls"]: status_str = "tool_call"
+                        elif p_type == "tool": status_str = "tool_exec"
+                        
+                        payload = serialize_for_json(token_data)
+                        payload["_meta"] = {"type": "delta", "status": status_str}
+                        
+                        # Add to buffer
+                        content = payload.get("content", "")
+                        if content and isinstance(content, str):
+                            self.stream_buffer.append(content)
+                        
+                        # Broadcast immediately
+                        await self.broadcast({
+                            "type": "token",
+                            "message": payload
+                        })
+                    else:
+                        # Raw string token
+                        self.stream_buffer.append(str(token_data))
+                        await self.broadcast({
+                            "type": "token",
+                            "content": token_data
+                        })
+
+                # Stream finished normally
+                final_buffer = "".join(self.stream_buffer)
+                await self.broadcast({
+                    "type": "stream_complete",
+                    "buffer": final_buffer
+                })
+                
+                # Commit to chat history
+                messages = await channel_instance.context.chat.get() or []
+                if messages:
+                    last_msg = messages[-1]
+                    last_msg['index'] = len(messages) - 1
+                    await self.broadcast({
+                        "type": "message_added",
+                        "message": serialize_for_json(last_msg)
+                    })
+                
+                # Clear buffer
+                self.stream_buffer = []
+                self.active_chat_id = None
+
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                # Log the error but don't broadcast it as it might confuse the UI
+                channel_instance.log("webui", f"Background stream error: {core.detail_error(e)}")
+                self.stream_buffer = []
+                self.active_chat_id = None
+
+        self.active_stream_task = asyncio.create_task(stream_worker())
 
 manager = ConnectionManager()
 
@@ -213,6 +303,40 @@ async def websocket_endpoint(websocket: WebSocket):
                             "title": new_title,
                             "tags": await channel_instance.context.chat.get_tags() or []
                         })
+
+                elif msg_type == "switch_chat":
+                    new_chat_id = data.get("chat_id")
+                    if new_chat_id:
+                        # Cancel current stream if any
+                        if manager.active_stream_task and not manager.active_stream_task.done():
+                            manager.active_stream_task.cancel()
+                        
+                        # Switch context
+                        await channel_instance.context.chat.load_chat(new_chat_id)
+                        manager.active_chat_id = new_chat_id
+                        
+                        # Broadcast the switch to all clients
+                        await manager.broadcast({
+                            "type": "chat_switched",
+                            "chat_id": new_chat_id,
+                            "buffer": manager.stream_buffer
+                        })
+
+                elif msg_type == "new_chat":
+                    # Cancel current stream
+                    if manager.active_stream_task and not manager.active_stream_task.done():
+                        manager.active_stream_task.cancel()
+                    
+                    # Create new chat
+                    new_id = await channel_instance.context.chat.new_chat()
+                    manager.active_chat_id = new_id
+                    
+                    # Broadcast the switch
+                    await manager.broadcast({
+                        "type": "chat_switched",
+                        "chat_id": new_id,
+                        "buffer": []
+                    })
 
             except json.JSONDecodeError:
                 pass
@@ -605,55 +729,26 @@ async def stream_message(request: Request, user: str = Depends(require_auth)):
     data = await request.json()
     stream_id = str(uuid.uuid4())[:8]
 
-    async def event_generator():
+    # Start the background stream
+    async def generator():
         try:
-            # Initial connection signal
-            yield f"data: {json.dumps({'_meta': {'type': 'connection', 'status': 'connected'}, 'id': stream_id})}\n\n"
-
             async for token_data in channel_instance.send_stream(data, commands_authorized=True):
                 if stream_id in stream_cancellations:
                     stream_cancellations.discard(stream_id)
-                    yield f"data: {json.dumps({'_meta': {'type': 'cancelled'}})}\n\n"
-                    break
+                    yield {'type': 'cancelled'}
+                    return
 
                 if isinstance(token_data, dict) and token_data.get('type') == 'error':
-                    yield f"data: {json.dumps({'_meta': {'type': 'error'}, 'error_data': token_data.get('content', {})})}\n\n"
-                    break
+                    yield token_data
+                    return
 
-                # Map status
-                p_type = token_data.get("type")
-                status_str = "idle"
-                if p_type == "reasoning": status_str = "thinking"
-                elif p_type in ["tool_call_delta", "tool", "tool_calls"]: status_str = "tool_call"
-                elif p_type == "tool": status_str = "tool_exec"
-
-                payload = serialize_for_json(token_data)
-                payload["_meta"] = {"type": "delta", "status": status_str}
-                yield f"data: {json.dumps(payload)}\n\n"
-
-            # Post-stream: Broadcast the new message with index
-            messages = await channel_instance.context.chat.get() or []
-            if messages:
-                last_msg = messages[-1]
-                # Add index for frontend compatibility
-                last_msg['index'] = len(messages) - 1
-                await manager.broadcast({
-                    "type": "message_added",
-                    "message": serialize_for_json(last_msg)
-                })
-
-            # Commit phase
-            serialized_history = [serialize_for_json(m) for m in messages]
-            yield f"data: {json.dumps({'_meta': {'type': 'commit'}, 'history': serialized_history})}\n\n"
-
+                yield token_data
         except Exception as e:
-            err_msg = core.detail_error(e) if core.debug else str(e)
-            yield f"data: {json.dumps({'_meta': {'type': 'error'}, 'error': err_msg})}\n\n"
+            yield {'type': 'error', 'content': core.detail_error(e) if core.debug else str(e)}
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={
-        'Cache-Control': 'no-cache',
-        'X-Accel-Buffering': 'no'
-    })
+    await manager.start_background_stream(manager.active_chat_id or "default", generator())
+
+    return JSONResponse({"status": "streaming", "id": stream_id})
 
 
 @app.post("/send")
@@ -890,6 +985,8 @@ async def load_chat(id: str, user: str = Depends(require_auth)):
 
     for i, msg in enumerate(messages):
         msg['index'] = i
+
+    await manager.broadcast({"type": "chat_switched", "chat_id": loaded_id})
 
     return {
         'success': True, 'chat': {

@@ -11,6 +11,7 @@ let placeholderUserWrapper = null;
 let manuallyCollapsedReasoning = new Set();
 let toolProcessingIndicatorElement = null;
 let fancyProcessingIndicator = null;
+let streamStarted = false;
 
 /**
  * Updates the stop button icon and streaming indicator based on typewriter state.
@@ -64,6 +65,11 @@ function resetStreamState() {
     segCounter = 0;
     activeTypewriterSegId = -1;
     clearStreamingToolCalls();
+    window._currentAiWrapper = null;
+    window._currentAiMsgDiv = null;
+    window._currentUseTypewriter = false;
+    window._currentUseStreamingSound = false;
+    window._streamInitialized = false;
 }
 
 // =============================================================================
@@ -330,15 +336,9 @@ async function send(providedContent = null) {
     isDataStreaming = true;
     currentController = new AbortController();
     
-    // Update stop button to show streaming indicator when tokens start
     updateStopButtonState();
-
-    let playedCompletionSound = false;
-
-    // Play send message sound
     TypewriterAudioManager.play('send_message');
 
-    // Create AI wrapper
     const aiWrapper = document.createElement('div');
     aiWrapper.className = 'message-wrapper ai hidden streaming';
     aiWrapper.dataset.index = 'streaming';
@@ -348,30 +348,19 @@ async function send(providedContent = null) {
     aiWrapper.appendChild(aiMsgDiv);
 
     const aiActions = createActionButtons('assistant', 'streaming', '', true);
-
     const statsDiv = document.createElement('div');
     statsDiv.id = 'message-stats-container';
     statsDiv.className = 'action-stats';
-
-    // Wrap buttons + stats in a single row container
     const actionsRow = document.createElement('div');
     actionsRow.className = 'actions-stats-row';
     actionsRow.appendChild(aiActions);
     actionsRow.appendChild(statsDiv);
-
     aiWrapper.appendChild(actionsRow);
-
-    let streamHadError = false;
-    let streamStarted = false;
 
     const typewriterEnabled = localStorage.getItem("typewriterEnabled") === 'true';
     const typewriterSpeed = parseInt(localStorage.getItem("typewriterSpeed") ?? "30", 10);
     const useTypewriter = typewriterEnabled && typewriterSpeed > 0;
     const useStreamingSound = localStorage.getItem("tokenEnabled") === 'true';
-
-    let progressBarFill = null;
-    let progressTextPercent = null;
-    let progressTextETA = null;
 
     scrollToBottom();
 
@@ -397,315 +386,64 @@ async function send(providedContent = null) {
             window.updateUploadQueueUI();
         }
 
-        chat.insertBefore(aiWrapper, typing);
+        // DO NOT insert aiWrapper yet - wait for first token
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let lastMessageType = null;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-
-                try {
-                    const data = JSON.parse(line.slice(6));
-
-                    // Track message type transitions to play reasoning end sound
-                    if (lastMessageType === 'reasoning' && data.type !== 'reasoning' && data.type !== undefined) {
-                        TypewriterAudioManager.play('reasoning_end');
-                    }
-                    lastMessageType = data.type;
-
-                    // Handle metadata
-                    if (data._meta) {
-                        const { type: metaType } = data._meta;
-
-                        // Handle prompt processing progress
-                        if (data.type === 'prompt_progress') {
-                            const prog = data.content;
-
-                            if (!streamStarted) {
-                                promptProcessingReceived = true;
-                                if (typing && !fancyProcessingIndicator) {
-                                    fancyProcessingIndicator = document.createElement('div');
-                                    fancyProcessingIndicator.className = 'prompt-processing-indicator-wrapper tool-processing-content';
-                                    chat.insertBefore(fancyProcessingIndicator, typing);
-                                    typing.style.display = 'none';
-
-                                    // 🟢 BUILD ONCE
-                                    fancyProcessingIndicator.innerHTML = `
-                                    <div class="prompt-processing-indicator">
-                                    <div class="progress-header">
-                                    <span class="prompt-processing-percent">0%</span>
-                                    <span class="prompt-processing-eta" style="opacity: 0.7">(ETA: 0s)</span>
-                                    </div>
-                                    <div class="prompt-progress-bar">
-                                    <div class="prompt-progress-bar-fill" style="width: 0%"></div>
-                                    </div>
-                                    </div>
-                                    `;
-
-                                    // 🟢 CACHE DOM REFERENCES
-                                    progressBarFill = fancyProcessingIndicator.querySelector('.prompt-progress-bar-fill');
-                                    progressTextPercent = fancyProcessingIndicator.querySelector('.prompt-processing-percent');
-                                    progressTextETA = fancyProcessingIndicator.querySelector('.prompt-processing-eta');
-
-                                    TypewriterAudioManager.playProcessingSound();
-                                    scrollToBottom();
-                                }
-                            }
-
-                            // Calculate progress (same logic as before)
-                            const cache = prog.cache || 0;
-                            const processed = prog.processed - cache;
-                            const total = prog.total - cache;
-                            const percent = total > 0 ? Math.round((processed / total) * 100) : 0;
-                            const elapsed = prog.time_ms / 1000;
-                            const remaining = (total - processed) > 0 ? (elapsed / processed) * (total - processed) : 0;
-
-                            // 🟢 NEW: Update Tool Processing Indicator if it exists
-                            if (toolProcessingIndicatorElement && toolProcessingIndicatorElement.updateProgress) {
-                                toolProcessingIndicatorElement.updateProgress(percent);
-                                // Don't return here, as prompt_progress might also be needed for other things,
-                                // or if the backend sends it for the main response too.
-                            }
-
-                            // 🟢 UPDATE CACHED ELEMENTS DIRECTLY (no innerHTML!)
-                            if (progressBarFill) {
-                                progressBarFill.style.width = `${percent}%`;
-                            }
-                            if (progressTextPercent && progressTextETA) {
-                                progressTextPercent.textContent = `${percent}%`;
-                                progressTextETA.textContent = `(ETA: ${Math.ceil(remaining)}s)`;
-                            }
-                        }
-
-
-                        if (metaType === 'commit') {
-                            // Signal that data streaming is complete so the typewriter can finish
-                            isDataStreaming = false;
-                            // Update stop button state to show "Skip" if typewriter is still running
-                            updateStopButtonState();
-                            // Wait for typewriter to finish before finalizing
-                            if (isTypewriterRunning) {
-                                await waitForTypewriter();
-                            } else if (!useTypewriter) {
-                                // Play completion sound if typewriter mode was off
-                                TypewriterAudioManager.play('completion');
-                                playedCompletionSound = true;
-                            }
-                            finalizeAllContent();
-                            collapseFinishedReasoning(aiMsgDiv);
-                            await finalizeStreamingUI(aiWrapper, aiMsgDiv);
-                            return;
-                        }
-
-                        if (metaType === 'cancelled') {
-                            aiWrapper.classList.remove('hidden');
-                            aiMsgDiv.innerHTML = '<span style="color:#f88;">[Cancelled]</span>';
-                            finishStream();
-                            return;
-                        }
-
-                        if (metaType === 'error') {
-                            handleInlineError(data, aiMsgDiv, aiWrapper, streamStarted);
-                            finishStream();
-                            return;
-                        }
-                    }
-
-                    if (data.id) currentStreamId = data.id;
-
-                    // Content streaming
-                    if (data.type === 'content' || data.token) {
-                        if (!streamStarted) {
-                            removePlaceholder();
-                            startStreamingUI(aiWrapper, typing);
-                            streamStarted = true;
-
-                            // Play response start sound
-                            TypewriterAudioManager.play('response_start');
-                            TypewriterAudioManager.stopProcessingSound();
-
-                            // Hide fancy indicator and restore typing indicator
-                            if (fancyProcessingIndicator) {
-                                fancyProcessingIndicator.remove();
-                                fancyProcessingIndicator = null;
-                            }
-                            typing.style.display = '';
-                        }
-                        const token = data.content || data.token || '';
-                        if (token) {
-                            // Clear processing indicators when content starts
-                            clearProcessingIndicators();
-                            TypewriterAudioManager.stopProcessingSound();
-
-                            appendStreamText('content', token, useTypewriter);
-                            if (useTypewriter) {
-                                const activeSeg = streamSegments.find(s => s.id === activeTypewriterSegId);
-                                if (activeSeg && activeSeg.type === 'content') {
-                                    for (const char of token) {
-                                        typewriterQueue.push({ segId: activeSeg.id, char });
-                                    }
-                                    if (!isTypewriterRunning) startTypewriterProcessSegments(aiMsgDiv);
-                                }
-                            } else {
-                                renderStreamSegments(aiMsgDiv);
-                            }
-
-                            // Play sound on every token if streaming sound is enabled AND typewriter mode is OFF
-                            if (!useTypewriter && useStreamingSound && token.trim() != '') {
-                                TypewriterAudioManager.play('token');
-                            }
-                        }
-                    }
-
-                    // Reasoning streaming
-                    if (data.type === 'reasoning') {
-                        const token = data.content || '';
-                        if (token) {
-                            TypewriterAudioManager.stopProcessingSound();
-
-                            if (!streamStarted) {
-                                removePlaceholder();
-                                startStreamingUI(aiWrapper, typing);
-                                streamStarted = true;
-
-                                // Play response start sound
-                                TypewriterAudioManager.play('response_start');
-
-                                // Hide fancy indicator and restore typing indicator
-                                if (fancyProcessingIndicator) {
-                                    fancyProcessingIndicator.remove();
-                                    fancyProcessingIndicator = null;
-                                }
-                                typing.style.display = '';
-                            }
-                            // Clear processing indicators when reasoning starts
-                            clearProcessingIndicators();
-
-                            appendStreamText('reasoning', token);
-                            renderStreamSegments(aiMsgDiv);
-
-
-                            // Play sound on every token if streaming sound is enabled
-                            if (useStreamingSound) {
-                                TypewriterAudioManager.play('token');
-                            }
-                        }
-                    }
-
-                    // Tool call delta
-                    if (data.type === 'tool_call_delta') {
-                        if (!streamStarted) {
-                            removePlaceholder();
-                            startStreamingUI(aiWrapper, typing);
-                            streamStarted = true;
-
-                            // Hide fancy indicator and restore typing indicator
-                            if (fancyProcessingIndicator) {
-                                fancyProcessingIndicator.remove();
-                                fancyProcessingIndicator = null;
-                            }
-                            typing.style.display = '';
-                        }
-                        ensureToolCallsSegment();
-                        handleToolCallDelta(data, aiMsgDiv, aiWrapper);
-
-                        // Play sound on every token if streaming sound is enabled
-                        if (useStreamingSound) {
-                            TypewriterAudioManager.play('token');
-                        }
-                    }
-
-                    // Tool response
-                    if (data.type === 'tool') {
-                        handleToolResponse(data, aiMsgDiv);
-                        TypewriterAudioManager.playProcessingSound();
-                    }
-
-                    // Complete tool calls
-                    if (data.type === 'tool_calls') {
-                        const toolCalls = data.content || [];
-                        finalizeStreamingToolCalls(toolCalls, aiMsgDiv);
-                        TypewriterAudioManager.stopProcessingSound();
-                    }
-
-                    // Token usage updates (from API)
-                    if (data.type === 'token_usage') {
-                        updateTokenUsage();
-                    }
-
-                    // Update the timing stats
-                    if (data.timings) {
-                        updateTimingStats(data.timings);
-                    }
-                } catch (e) {
-                    console.error("Error parsing stream line:", e, line);
-                }
+        // Initialize streaming UI state
+        if (!window._streamInitialized) {
+            removePlaceholder();
+            startStreamingUI(aiWrapper, typing);
+            window._streamInitialized = true;
+            TypewriterAudioManager.play('response_start');
+            TypewriterAudioManager.stopProcessingSound();
+            if (fancyProcessingIndicator) {
+                fancyProcessingIndicator.remove();
+                fancyProcessingIndicator = null;
             }
+            typing.style.display = '';
         }
+
+        // Initialize progress indicator
+        if (typing && !fancyProcessingIndicator) {
+            fancyProcessingIndicator = document.createElement('div');
+            fancyProcessingIndicator.className = 'prompt-processing-indicator-wrapper tool-processing-content';
+            chat.insertBefore(fancyProcessingIndicator, typing);
+            typing.style.display = 'none';
+
+            fancyProcessingIndicator.innerHTML = `
+                <div class="prompt-processing-indicator">
+                    <div class="progress-header">
+                        <span class="prompt-processing-percent">0%</span>
+                        <span class="prompt-processing-eta" style="opacity: 0.7">(ETA: 0s)</span>
+                    </div>
+                    <div class="prompt-progress-bar">
+                        <div class="prompt-progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+            `;
+
+            progressBarFill = fancyProcessingIndicator.querySelector('.prompt-progress-bar-fill');
+            progressTextPercent = fancyProcessingIndicator.querySelector('.prompt-processing-percent');
+            progressTextETA = fancyProcessingIndicator.querySelector('.prompt-processing-eta');
+
+            TypewriterAudioManager.playProcessingSound();
+        }
+
+        // Pass references to global handlers so they can update this specific wrapper
+        window._currentAiWrapper = aiWrapper;
+        window._currentAiMsgDiv = aiMsgDiv;
+        window._currentUseTypewriter = useTypewriter;
+        window._currentUseStreamingSound = useStreamingSound;
+
+        // If WebSocket is not connected yet, fallback to polling or show placeholder
+        if (!isWsConnected) {
+            console.warn('WebSocket not connected, falling back to polling');
+        }
+
     } catch (err) {
         removePlaceholder();
         if (err.name !== 'AbortError') {
-            streamHadError = true;
-            typewriterQueue = [];
-            handleCatchError(err, aiMsgDiv, aiWrapper, streamStarted);
+            handleCatchError(err, aiMsgDiv, aiWrapper, false);
         }
-    } finally {
-        isDataStreaming = false;
-        // Update stop button state to show "Skip" if typewriter is still running
-        updateStopButtonState();
-
-        if (window.upload_queue && window.upload_queue.files.length > 0) {
-            window.upload_queue.wrappers.forEach(w => w.remove());
-            window.upload_queue.files = [];
-            window.upload_queue.wrappers = [];
-            window.updateUploadQueueUI();
-        }
-
-        if (isTypewriterRunning) {
-            await waitForTypewriter();
-        } else if (!useTypewriter && !playedCompletionSound) {
-            // Play completion sound if typewriter mode was off
-            TypewriterAudioManager.play('completion');
-        }
-
-        // Only finalize if not already done via commit
-        if (isStreaming) {
-            finalizeAllContent();
-            collapseFinishedReasoning(aiMsgDiv);
-            await finalizeStreamingUI(aiWrapper, aiMsgDiv);
-        }
-
-        // Final safety cleanup for processing indicators
-        if (fancyProcessingIndicator) {
-            fancyProcessingIndicator.remove();
-            fancyProcessingIndicator = null;
-        }
-        typing.style.display = '';
-        
-        // Update chat info
-        try {
-            const chatResponse = await fetch('/chat/current');
-            const chatData = await chatResponse.json();
-            if (chatData.success && chatData.chat) {
-                currentChatId = chatData.chat.id;
-                updateChatTitleBar(chatData.chat.title, chatData.chat.tags || []);
-            }
-        } catch (e) {
-            console.error("Failed to update chat info", e);
-        }
-
-        await loadChats();
     }
 }
 
@@ -778,6 +516,8 @@ async function finalizeStreamingUI(aiWrapper, aiMsgDiv) {
 
     // Reset stream state AFTER UI is finalized
     resetStreamState();
+
+    TypewriterAudioManager.play('completion');
 
     setInputState(false, false, false);
     isStreaming = false;
