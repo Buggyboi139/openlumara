@@ -93,7 +93,6 @@ class ConnectionManager:
         self.max_log_buffer = 1000  # Keep last 1000 logs
 
         # Global State for Unified Experience
-        self.active_chat_id: Optional[str] = None
         self.stream_buffer: List[str] = []  # Accumulates tokens for the current stream
         self.active_stream_task: Optional[asyncio.Task] = None
 
@@ -101,6 +100,8 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections.append(websocket)
         self.connection_users[websocket] = user
+
+        current_chat_id = await channel_instance.context.chat.get_id()
         
         # Send log history to new connection
         if self.log_buffer:
@@ -110,11 +111,11 @@ class ConnectionManager:
             })
 
         # Send global state sync if active
-        if self.active_chat_id:
+        if current_chat_id:
             await websocket.send_json({
                 "type": "sync_state",
-                "active_chat_id": self.active_chat_id,
-                "buffer": "".join(self.stream_buffer)
+                "active_chat_id": current_chat_id,
+                "buffer": self.stream_buffer
             })
 
     def disconnect(self, websocket: WebSocket):
@@ -171,9 +172,7 @@ class ConnectionManager:
                         payload["_meta"] = {"type": "delta", "status": status_str}
                         
                         # Add to buffer
-                        content = payload.get("content", "")
-                        if content and isinstance(content, str):
-                            self.stream_buffer.append(content)
+                        self.stream_buffer.append(payload)
                         
                         # Broadcast immediately
                         await self.broadcast({
@@ -189,10 +188,9 @@ class ConnectionManager:
                         })
 
                 # Stream finished normally
-                final_buffer = "".join(self.stream_buffer)
                 await self.broadcast({
                     "type": "stream_complete",
-                    "buffer": final_buffer,
+                    "buffer": self.stream_buffer,
                     "index": next_index
                 })
                 
@@ -306,7 +304,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             manager.active_stream_task.cancel()
                         
                         # Switch context
-                        await channel_instance.context.chat.load_chat(new_chat_id)
+                        await channel_instance.context.chat.load(new_chat_id)
                         manager.active_chat_id = new_chat_id
                         
                         # Broadcast the switch to all clients
@@ -331,13 +329,27 @@ async def websocket_endpoint(websocket: WebSocket):
                         "chat_id": new_id,
                         "buffer": []
                     })
+
+                elif msg_type == "chat_delete":
+                    chat_id = data.get("chat_id")
+                    if not chat_id:
+                        return False
+
+                    # delete the chat
+                    await channel_instance.context.chat.delete(chat_id)
+                    # the chat class manages the switch to the chat before the deleted one
+                    await manager.broadcast({
+                        "type": "chat_switched",
+                        "chat_id": channel_instance.context.chat.current,
+                        "buffer": []
+                    })
                 
                 elif msg_type == "user_message":
                     # Handle user message via WebSocket
                     content = data.get("content")
                     if content:
                         try:
-                            chat_id = manager.active_chat_id or "default"
+                            chat_id = await channel_instance.context.chat.get_id() or "default"
                             # Ensure payload is a dict
                             payload = content if isinstance(content, dict) else {"role": "user", "content": content}
                             await start_ai_stream_task(chat_id, payload)
@@ -349,6 +361,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
                     else:
                         print("[DEBUG] WebSocket: Received user_message but no content")
+
+                elif msg_type == "message_delete":
+                    index = data.get("index")
+                    if not index:
+                        return False
+
+                    await channel_instance.context.chat.delete_from(index-1)
+                    await manager.broadcast({
+                        "type": "messages_updated",
+                        "messages": await channel_instance.context.chat.get()
+                    })
 
                 elif msg_type == "message_regenerate":
                     index = data.get("index")
@@ -821,7 +844,7 @@ async def stream_message(request: Request, user: str = Depends(require_auth)):
         raise HTTPException(status_code=503, detail=status)
 
     data = await request.json()
-    chat_id = manager.active_chat_id or "default"
+    chat_id = await channel_instance.context.chat.get_id() or "default"
     
     # Use the unified task starter
     stream_id = await start_ai_stream_task(chat_id, data)

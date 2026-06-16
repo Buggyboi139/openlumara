@@ -103,18 +103,13 @@ async function cancelEdit() {
 async function deleteMessage(index) {
     if (!confirm('Delete this message and all messages after it?')) return;
 
-    try {
-        const response = await fetch('/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ index: index })
-        });
-
-        if (response.ok) {
-            await syncMessages();
-        }
-    } catch (err) {
-        console.error('Failed to delete message:', err);
+    if (window.socket && window.socket.readyState === WebSocket.OPEN) {
+        window.socket.send(JSON.stringify({
+            type: 'message_delete',
+            index: index
+        }));
+    } else {
+        showApiConfigError("Websocket connection is not ready. Please wait a bit and try again!", 'websocket_not_open');
     }
 }
 

@@ -126,6 +126,50 @@ function handlePromptProgress(prog) {
     }
 }
 
+function createAiWrapper() {
+    const aiWrapper = document.createElement('div');
+    aiWrapper.className = 'message-wrapper ai hidden streaming';
+
+    const aiMsgDiv = document.createElement('div');
+    aiMsgDiv.className = 'message ai';
+    aiWrapper.appendChild(aiMsgDiv);
+
+    const aiActions = createActionButtons('assistant', 'streaming', '', true);
+    const statsDiv = document.createElement('div');
+    statsDiv.id = 'message-stats-container';
+    statsDiv.className = 'action-stats';
+    const actionsRow = document.createElement('div');
+    actionsRow.className = 'actions-stats-row';
+    actionsRow.appendChild(aiActions);
+    actionsRow.appendChild(statsDiv);
+    aiWrapper.appendChild(actionsRow);
+
+    // FIX: Make the wrapper visible immediately
+    aiWrapper.classList.remove('hidden');
+
+    // Set globals for subsequent tokens in this stream
+    window._currentAiWrapper = aiWrapper;
+    window._currentAiMsgDiv = aiMsgDiv;
+    window._currentUseTypewriter = localStorage.getItem("typewriterEnabled") === 'true';
+    window._currentUseStreamingSound = localStorage.getItem("tokenEnabled") === 'true';
+
+    // Initialize local streaming state
+    isStreaming = true;
+    isDataStreaming = true;
+
+    // remove typing indicator
+    typing.classList.toggle('show', false);
+    if (typing) { typing.style.display = ''; }
+
+    // Remove progress indicator when first token arrives
+    if (fancyProcessingIndicator) {
+        fancyProcessingIndicator.remove();
+        fancyProcessingIndicator = null;
+    }
+
+    return aiWrapper
+}
+
 function handleWebSocketMessage(data) {
     // Handle typed messages from backend
     if (data.type === 'sync_state') {
@@ -134,14 +178,36 @@ function handleWebSocketMessage(data) {
             // We need to make sure the chat is fully loaded before syncing state
             // In a real app, this would be an async operation.
             // For now, we trigger the switch.
-            window.switchChat(data.active_chat_id, true);
+            loadChat(data.active_chat_id);
         }
         if (data.buffer) {
+            console.log(data.buffer);
+
             // Append buffer to current message if streaming
-            appendStreamText(data.buffer);
-            if (window._currentAiMsgDiv) {
-                renderStreamSegments(window._currentAiMsgDiv);
-            }
+            createAiWrapper();
+
+            // simulate a super-fast stream to "catch up"
+            data.buffer.forEach(token => {
+                if (token.type === 'content' || token.type === 'reasoning') {
+                    if (token.content) {
+                        appendStreamText(token.type, token.content);
+                    }
+                } else if (token.type === 'tool_call_delta') {
+                    // Handle tool call deltas
+                    ensureToolCallsSegment();
+                    handleToolCallDelta(token, window._currentAiMsgDiv, window._currentAiWrapper);
+                } else if (token.type === 'tool_calls') {
+                    // Handle completed tool calls
+                    finalizeStreamingToolCalls(token.tool_calls || [], window._currentAiMsgDiv);
+                } else if (token.type === 'tool') {
+                    // Handle tool responses
+                    handleToolResponse(token, window._currentAiMsgDiv);
+                }
+            });
+
+            // if (window._currentAiMsgDiv) {
+            //     renderStreamSegments(window._currentAiMsgDiv);
+            // }
         }
         return;
     }
@@ -214,46 +280,8 @@ function handleWebSocketMessage(data) {
             // If no AI message wrapper exists, it means a new stream has started.
             // We create the streaming AI wrapper here.
             console.log('[DEBUG] First token received. Creating streaming AI wrapper.');
-            
-            const aiWrapper = document.createElement('div');
-            aiWrapper.className = 'message-wrapper ai hidden streaming';
 
-            const aiMsgDiv = document.createElement('div');
-            aiMsgDiv.className = 'message ai';
-            aiWrapper.appendChild(aiMsgDiv);
-
-            const aiActions = createActionButtons('assistant', 'streaming', '', true);
-            const statsDiv = document.createElement('div');
-            statsDiv.id = 'message-stats-container';
-            statsDiv.className = 'action-stats';
-            const actionsRow = document.createElement('div');
-            actionsRow.className = 'actions-stats-row';
-            actionsRow.appendChild(aiActions);
-            actionsRow.appendChild(statsDiv);
-            aiWrapper.appendChild(actionsRow);
-            
-            // FIX: Make the wrapper visible immediately
-            aiWrapper.classList.remove('hidden');
-            
-            // Set globals for subsequent tokens in this stream
-            window._currentAiWrapper = aiWrapper;
-            window._currentAiMsgDiv = aiMsgDiv;
-            window._currentUseTypewriter = localStorage.getItem("typewriterEnabled") === 'true';
-            window._currentUseStreamingSound = localStorage.getItem("tokenEnabled") === 'true';
-
-            // Initialize local streaming state
-            isStreaming = true;
-            isDataStreaming = true;
-
-            // remove typing indicator
-            typing.classList.toggle('show', false);
-            if (typing) { typing.style.display = ''; }
-
-            // Remove progress indicator when first token arrives
-            if (fancyProcessingIndicator) {
-                fancyProcessingIndicator.remove();
-                fancyProcessingIndicator = null;
-            }
+            createAiWrapper();
         } else if (window._currentAiWrapper && !window._currentAiWrapper.parentNode) {
             // Fallback: Insert AI wrapper if it was created but not yet in the DOM
             chat.insertBefore(window._currentAiWrapper, typing);

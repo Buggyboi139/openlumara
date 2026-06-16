@@ -975,19 +975,13 @@ async function saveCurrentChat() {
 async function deleteChat(chatId) {
     if (!confirm('Delete this chat?')) return;
 
-    try {
-        const response = await fetch('/chat/delete?id=' + chatId, { method: 'POST' });
-        const data = await response.json();
-
-        if (data.success) {
-            await restoreCurrentChat();
-            await loadChats();
-            closeSidebar();
-        } else {
-            alert('Failed to delete chat: ' + (data.error || 'Unknown error'));
-        }
-    } catch (e) {
-        console.error('Failed to delete chat:', e);
+    if (window.socket && window.socket.readyState === WebSocket.OPEN) {
+        window.socket.send(JSON.stringify({
+            type: 'chat_delete',
+            chat_id: chatId
+        }));
+    } else {
+        showApiConfigError("Websocket connection is not ready. Please wait a bit and try again!", 'websocket_not_open');
     }
 }
 
