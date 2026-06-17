@@ -6,7 +6,7 @@ import urllib.parse
 import re
 import modules.http
 
-class WebReader(modules.http.Http):
+class WebScraper(modules.http.Http):
     """
     Lets your AI read the content of pages on the web
     """
@@ -17,6 +17,7 @@ class WebReader(modules.http.Http):
             "description": "Maximum number of simultaneous web requests allowed."
         }
     }
+    dependencies = ["requests", "aiohttp", "beautifulsoup4"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

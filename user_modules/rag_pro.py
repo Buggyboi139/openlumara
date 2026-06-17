@@ -15,33 +15,66 @@ class RagPro(core.module.Module):
         "knowledge_folder": {
             "description": "The folder within /data to store yer documents",
             "default": "knowledge"
+        },
+        "embedding_model": {
+            "description": "SentenceTransformer model name or local path used for embeddings.",
+            "default": "all-MiniLM-L6-v2"
+        },
+        "local_files_only": {
+            "description": "Only load the embedding model from local cache/files. Disable this to allow first-run downloads.",
+            "default": True
+        },
+        "auto_ingest_on_ready": {
+            "description": "Automatically index the knowledge folder when OpenLumara starts.",
+            "default": False
         }
     }
+    dependencies = ["chromadb", "sentence-transformers", "langchain-text-splitters"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         
         folder_name = self.config.get("knowledge_folder")
-        self.knowledge_path = os.path.join(core.get_data_path(), folder_name)
-        db_path = os.path.join(core.get_data_path(), "rag_db")
+        self.knowledge_path = core.get_data_path(folder_name)
+        db_path = core.get_data_path("rag_db")
         
         if not os.path.exists(self.knowledge_path):
             os.makedirs(self.knowledge_path)
 
         self.client = chromadb.PersistentClient(path=db_path)
         self.collection = self.client.get_or_create_collection("knowledge_base")
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        self.embedder = None
+        self.embedder_error = None
 
     async def on_ready(self):
-        asyncio.create_task(self._safe_ingest())
+        if self.config.get("auto_ingest_on_ready", default=False):
+            asyncio.create_task(self._safe_ingest())
+
+    def _get_embedder(self):
+        if self.embedder is not None:
+            return self.embedder
+        if self.embedder_error:
+            raise RuntimeError(self.embedder_error)
+
+        model_name = self.config.get("embedding_model") or "all-MiniLM-L6-v2"
+        local_files_only = bool(self.config.get("local_files_only", default=True))
+        try:
+            self.embedder = SentenceTransformer(model_name, local_files_only=local_files_only)
+            return self.embedder
+        except Exception as e:
+            self.embedder_error = f"RAG embedding model unavailable: {e}"
+            raise RuntimeError(self.embedder_error) from e
 
     async def _safe_ingest(self):
         try:
             await self.ingest_folder(self.knowledge_path)
+            return True
         except Exception as e:
-            self._log(f"RAG Ingestion failed: {e}")
+            self.log("rag_pro", f"RAG ingestion failed: {e}")
+            return False
 
     async def ingest_folder(self, folder_path):
+        embedder = await asyncio.to_thread(self._get_embedder)
         splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
         
         for root, _, files in os.walk(folder_path):
@@ -59,7 +92,7 @@ class RagPro(core.module.Module):
                     if not chunks:
                         continue
                     
-                    embeddings = await asyncio.to_thread(self.embedder.encode, chunks)
+                    embeddings = await asyncio.to_thread(embedder.encode, chunks)
                     embeddings_list = embeddings.tolist()
                     
                     ids = [f"{path}_{i}" for i in range(len(chunks))]
@@ -106,7 +139,11 @@ class RagPro(core.module.Module):
         if not query or not query.strip():
             return "A non-empty search query is required."
 
-        query_embedding_array = await asyncio.to_thread(self.embedder.encode, query)
+        try:
+            embedder = await asyncio.to_thread(self._get_embedder)
+            query_embedding_array = await asyncio.to_thread(embedder.encode, query)
+        except Exception as e:
+            return f"RAG search is unavailable: {e}"
         query_embedding = query_embedding_array.tolist()
 
         results = await asyncio.to_thread(
@@ -136,7 +173,7 @@ class RagPro(core.module.Module):
             page: The page number to read (starts at 1).
         """
         clean_name = os.path.basename(file_name)
-        target_path = os.path.join(self.knowledge_path, clean_name)
+        target_path = core.sandbox_path(self.knowledge_path, clean_name)
         
         if not os.path.exists(target_path):
             return f"Error: Could not find '{clean_name}' in the knowledge folder. Double check the file name."
@@ -183,5 +220,6 @@ class RagPro(core.module.Module):
         Forces the bot to re-read the knowledge folder and update the database.
         Usage: /rag_ingest
         """
-        await self._safe_ingest()
-        return "Aye aye! I just finished updating the knowledge database with any new scrolls ye added!"
+        if await self._safe_ingest():
+            return "Aye aye! I just finished updating the knowledge database with any new scrolls ye added!"
+        return "RAG ingest failed. Check the logs for the embedding model error."

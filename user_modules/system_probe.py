@@ -17,6 +17,8 @@ class SystemProbe(core.module.Module):
     """
 
     # 1. SETTINGS
+    dependencies = ["psutil"]
+
     settings = {
         "process_limit": {
             "default": 10,

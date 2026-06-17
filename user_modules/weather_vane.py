@@ -8,6 +8,7 @@ class WeatherVane(core.module.Module):
     """
 
     settings = {}
+    dependencies = ["requests"]
 
     async def check_weather(self, location: str):
         """

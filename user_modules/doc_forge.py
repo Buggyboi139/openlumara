@@ -43,13 +43,8 @@ class DocForge(core.module.Module):
         if not output_folder:
             output_folder = "training_cleaned"
 
-        self.knowledge_path = os.path.abspath(
-            os.path.join(core.get_data_path(), folder_name)
-        )
-
-        self.training_output_path = os.path.abspath(
-            os.path.join(self.knowledge_path, output_folder)
-        )
+        self.knowledge_path = core.get_data_path(folder_name)
+        self.training_output_path = core.sandbox_path(self.knowledge_path, output_folder)
 
         os.makedirs(self.knowledge_path, exist_ok=True)
         os.makedirs(self.training_output_path, exist_ok=True)
@@ -80,13 +75,15 @@ class DocForge(core.module.Module):
             return f"Error: '{file_name}' is not a .txt file. Training cleaner only accepts .txt sources."
 
         clean_name = os.path.basename(file_name)
-        target_path = os.path.abspath(os.path.join(self.knowledge_path, clean_name))
+        target_path = core.sandbox_path(self.knowledge_path, clean_name)
 
-        if not target_path.startswith(self.knowledge_path):
+        if os.path.commonpath([self.knowledge_path, target_path]) != self.knowledge_path:
             return "SECURITY ERROR: Attempted to access a file outside the restricted knowledge sandbox."
 
         if not os.path.exists(target_path):
             return f"Error: Could not find '{clean_name}' in the knowledge folder."
+
+        requested_chunk_chars = chunk_chars
 
         def _clean():
             try:
@@ -111,23 +108,21 @@ class DocForge(core.module.Module):
                     safe_base = self._safe_file_stem(base_name)
                     title = base_name.replace("_", " ").replace("-", " ").strip()
 
-                if chunk_chars is None:
-                    chunk_chars = int(self.config.get("default_chunk_chars") or 0)
+                if requested_chunk_chars is None:
+                    resolved_chunk_chars = int(self.config.get("default_chunk_chars") or 0)
                 else:
-                    chunk_chars = int(chunk_chars)
+                    resolved_chunk_chars = int(requested_chunk_chars)
 
                 saved_files = []
 
-                if chunk_chars and chunk_chars > 0:
-                    chunks = self._chunk_text(cleaned, chunk_chars)
+                if resolved_chunk_chars and resolved_chunk_chars > 0:
+                    chunks = self._chunk_text(cleaned, resolved_chunk_chars)
 
                     for idx, chunk in enumerate(chunks, start=1):
                         output_name = f"{safe_base}_TRAINING_part_{idx:03d}.txt"
-                        output_path = os.path.abspath(
-                            os.path.join(self.training_output_path, output_name)
-                        )
+                        output_path = core.sandbox_path(self.training_output_path, output_name)
 
-                        if not output_path.startswith(self.training_output_path):
+                        if os.path.commonpath([self.training_output_path, output_path]) != self.training_output_path:
                             return "SECURITY ERROR: Invalid output path."
 
                         with open(output_path, "w", encoding="utf-8") as f:
@@ -136,11 +131,9 @@ class DocForge(core.module.Module):
                         saved_files.append(output_name)
                 else:
                     output_name = f"{safe_base}_TRAINING.txt"
-                    output_path = os.path.abspath(
-                        os.path.join(self.training_output_path, output_name)
-                    )
+                    output_path = core.sandbox_path(self.training_output_path, output_name)
 
-                    if not output_path.startswith(self.training_output_path):
+                    if os.path.commonpath([self.training_output_path, output_path]) != self.training_output_path:
                         return "SECURITY ERROR: Invalid output path."
 
                     with open(output_path, "w", encoding="utf-8") as f:
@@ -157,17 +150,15 @@ class DocForge(core.module.Module):
                         "created_at": datetime.utcnow().isoformat() + "Z",
                         "raw_chars": len(raw_text),
                         "cleaned_chars": len(cleaned),
-                        "chunk_chars": chunk_chars,
+                        "chunk_chars": resolved_chunk_chars,
                         "output_files": saved_files,
                         "purpose": "llm_training_clean_text"
                     }
 
                     metadata_file = f"{safe_base}_TRAINING.meta.json"
-                    metadata_path = os.path.abspath(
-                        os.path.join(self.training_output_path, metadata_file)
-                    )
+                    metadata_path = core.sandbox_path(self.training_output_path, metadata_file)
 
-                    if not metadata_path.startswith(self.training_output_path):
+                    if os.path.commonpath([self.training_output_path, metadata_path]) != self.training_output_path:
                         return "SECURITY ERROR: Invalid metadata path."
 
                     with open(metadata_path, "w", encoding="utf-8") as f:

@@ -12,6 +12,8 @@ import core
 class Voice(core.module.Module):
     """Adds local speech-to-text and Kokoro text-to-speech helpers for voice chat."""
 
+    dependencies = ["kokoro-onnx", "numpy", "soundfile"]
+
     settings = {
         "target_folder": {"default": "voice", "description": "Where temporary voice files are stored under the data folder."},
         "max_text_chars": {"default": 1600, "description": "Maximum text length to send into TTS at once."},
@@ -65,7 +67,7 @@ class Voice(core.module.Module):
                 "options": {"kokoro_onnx": "Kokoro ONNX local TTS.", "disabled": "Disable text-to-speech."},
                 "description": "Text-to-speech backend."
             },
-            "model_path": {"default": "models/kokoro/kokoro-v1.0.onnx", "description": "Path to Kokoro ONNX model."},
+            "model_path": {"default": "models/kokoro/kokoro-v1.0.int8.onnx", "description": "Path to Kokoro ONNX model."},
             "voices_path": {"default": "models/kokoro/voices-v1.0.bin", "description": "Path to Kokoro voices file."},
             "voice": {
                 "default": "af_heart",
@@ -340,11 +342,12 @@ class Voice(core.module.Module):
         wav_path = result["content"]["path"]
         try:
             ogg_path = await asyncio.to_thread(self._encode_telegram_voice_sync, wav_path)
-            self._cleanup_paths(wav_path)
             return self.result({"path": ogg_path, "format": "ogg_opus"})
         except Exception as e:
             core.log("voice", f"telegram voice encode failed: {e}")
             return self.result(f"Telegram voice encode failed: {e}", success=False)
+        finally:
+            self._cleanup_paths(wav_path)
 
     def telegram_transcribe_enabled(self) -> bool:
         return bool(self._cfg("telegram", "transcribe_voice_messages", default=True))
@@ -373,7 +376,7 @@ class Voice(core.module.Module):
                 continue
             try:
                 path = os.path.abspath(path)
-                if path.startswith(self.target_path) and os.path.exists(path):
+                if os.path.commonpath([self.target_path, path]) == self.target_path and os.path.exists(path):
                     os.remove(path)
             except Exception:
                 pass

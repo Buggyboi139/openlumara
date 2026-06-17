@@ -3,7 +3,7 @@ import asyncio
 import subprocess
 import re
 
-class RedHatPlus(core.module.Module):
+class RedHatAdvanced(core.module.Module):
     """
     Advanced RedHat Toolkit (RedHat Plus).
     Integrates ProjectDiscovery ecosystem tools (Subfinder, HTTPX, Nuclei).

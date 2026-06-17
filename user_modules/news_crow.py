@@ -9,6 +9,7 @@ class NewsCrow(core.module.Module):
     """
 
     settings = {}
+    dependencies = ["feedparser", "requests"]
 
     # Built-in directory of reliable RSS feeds
     FEED_DIRECTORY = {

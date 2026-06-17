@@ -22,6 +22,7 @@ class RedHat(core.module.Module):
             "description": "Your Shodan API key for advanced network recon."
         }
     }
+    dependencies = ["requests", "shodan"]
 
     # 2. INITIALIZATION
     def __init__(self, *args, **kwargs):

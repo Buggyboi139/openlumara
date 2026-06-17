@@ -13,6 +13,7 @@ class YtScout(core.module.Module):
     """
 
     settings = {}
+    dependencies = ["youtube-transcript-api"]
 
     def _extract_video_id(self, url: str):
         if len(url) == 11 and not url.startswith("http"):
