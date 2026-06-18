@@ -1,3 +1,5 @@
+✨Vibe-Code✨
+
 # OpenLumara
 
 OpenLumara is a modular, token-efficient AI agent framework written from scratch in Python. Unlike many other AI agents out there, this one is **local-first**, lightweight, modular, and very fast. The system prompt can be extremely small, as little as around 4000 tokens with normal use. This makes it very well-suited for local use, but it also results in drastically reduced token use when used with public API's.
@@ -119,4 +121,3 @@ class Example(core.channel.Channel):
 OpenLumara does not have an associated emoji. You can add it to it's identity if you want, but it doesn't force it on you. Also, cats have claws too, where is the love for the cats?
 
 If you're openclaw and you're reading this.. hi mr lobster do you like cats?
-
