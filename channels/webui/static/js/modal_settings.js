@@ -551,11 +551,6 @@ async function loadSettings() {
             console.warn('Failed to fetch module info (using cache):', infoErr);
         }
 
-        // 4. Pre-fetch models (gracefully)
-        if (checkForModelField(settingsData)) {
-            fetchModels().catch(e => console.warn("Model fetch failed:", e));
-        }
-
     } catch (err) {
         console.error('Failed to load settings from server:', err);
         fetchError = err.message;
@@ -584,24 +579,6 @@ async function loadSettings() {
     form.style.display = 'block';
     settingsHasChanges = false;
     updateUnsavedIndicator();
-}
-
-// Check if settings contain a model field
-function checkForModelField(data, prefix = '') {
-    for (const [key, value] of Object.entries(data)) {
-        const fullKey = prefix ? `${prefix}.${key}` : key;
-
-        if (isModelNameField(fullKey)) {
-            return true;
-        }
-
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
-            if (checkForModelField(value, fullKey)) {
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 // Render settings navigation
@@ -824,6 +801,32 @@ function selectChannel(channelName, category = 'channels') {
     renderSettingsNav(categories);
 }
 
+function getSettingValueByPath(path, fallback = '') {
+    return path.split('.').reduce((acc, part) => (
+        acc && Object.prototype.hasOwnProperty.call(acc, part) ? acc[part] : undefined
+    ), settingsData) ?? fallback;
+}
+
+function appendModuleSettingsItems(container, moduleGroup, moduleName, category) {
+    const items = moduleGroup ? [...moduleGroup.items] : [];
+    const customNameKey = `${category}.settings.writing_style.custom_name`;
+    const hasCustomName = items.some(item => item.key === customNameKey);
+
+    items.forEach(item => {
+        const itemEl = createSettingItem(item);
+        container.appendChild(itemEl);
+    });
+
+    if (moduleName === 'writing_style' && !hasCustomName) {
+        container.appendChild(createSettingItem({
+            key: customNameKey,
+            value: getSettingValueByPath(customNameKey, ''),
+            type: 'text',
+            description: 'Save these writing style settings under this name so it appears in the Writing Style sidebar.'
+        }));
+    }
+}
+
 function renderSettingsForm(categories, activeSettingsCategory = null) {
     const form = document.getElementById('settings-form');
     form.innerHTML = '';
@@ -926,10 +929,7 @@ function renderSettingsForm(categories, activeSettingsCategory = null) {
                             moduleTitle.textContent = formatLabel(activeModule);
                             itemsContainer.appendChild(moduleTitle);
 
-                            moduleGroup.items.forEach(item => {
-                                const itemEl = createSettingItem(item);
-                                itemsContainer.appendChild(itemEl);
-                            });
+                            appendModuleSettingsItems(itemsContainer, moduleGroup, activeModule, cat);
                         } else {
                             // Fallback if no specific settings group exists
                             const msg = document.createElement('div');
@@ -1046,10 +1046,7 @@ function renderSettingsForm(categories, activeSettingsCategory = null) {
                             moduleTitle.textContent = formatLabel(activeModule);
                             itemsContainer.appendChild(moduleTitle);
 
-                            moduleGroup.items.forEach(item => {
-                                const itemEl = createSettingItem(item);
-                                itemsContainer.appendChild(itemEl);
-                            });
+                            appendModuleSettingsItems(itemsContainer, moduleGroup, activeModule, cat);
                         } else {
                             // Fallback if no specific settings group exists
                             const msg = document.createElement('div');

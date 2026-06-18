@@ -1,5 +1,5 @@
-const CACHE_NAME = 'openlumara-v7.1.2';
-const ASSETS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const CACHE_NAME = 'openlumara-v7.1.3';
+const ASSETS = ['/', '/manifest.json', '/openlumara-icon-192.png', '/openlumara-icon-512.png'];
 
 self.addEventListener('install', (e) => {
     // Precaching assets to ensure the browser recognizes this as an installable PWA

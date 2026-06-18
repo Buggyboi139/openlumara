@@ -201,6 +201,7 @@ function createAiWrapper() {
     const aiMsgDiv = document.createElement('div');
     aiMsgDiv.className = 'message ai';
     aiWrapper.appendChild(aiMsgDiv);
+    appendMessageMeta(aiMsgDiv, createTransientMessageMeta());
 
     const aiActions = createActionButtons('assistant', 'streaming', '', true);
     const statsDiv = document.createElement('div');
@@ -244,6 +245,7 @@ function createPlaceholderUserMessage(text) {
 
     msgDiv.appendChild(contentContainer);
     msgDiv.appendChild(status);
+    appendMessageMeta(msgDiv, createTransientMessageMeta());
     wrapper.appendChild(msgDiv);
 
     return wrapper;

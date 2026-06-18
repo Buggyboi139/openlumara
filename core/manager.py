@@ -352,9 +352,13 @@ class Manager:
 
     async def _initialize_api_connection(self):
         """Initialize API connection with user-friendly error handling."""
-        self.log("API", "Connecting to AI..")
+        validate_startup_connection = core.config.get("api", "validate_connection_on_startup", default=False)
+        if validate_startup_connection:
+            self.log("API", "Connecting to AI..")
+        else:
+            self.log("API", "Initializing AI client..")
 
-        connected = await self.API.connect()
+        connected = await self.API.connect(validate=validate_startup_connection)
         if not connected:
             error = self.API.get_last_error() or "Unknown error"
             self.log("API", f"Failed to connect: {error}")
@@ -365,7 +369,7 @@ class Manager:
         """Manually trigger API reconnection. Returns status dict."""
         self.log("API", "Attempting to reconnect...")
 
-        connected = await self.API.reconnect()
+        connected = await self.API.reconnect(validate=True)
         if connected:
             self.log("API", "Reconnected successfully")
             return {
@@ -384,6 +388,76 @@ class Manager:
         """Get current API connection status for display."""
         return self.API.get_connection_status()
 
+    def _case_insensitive_replace(self, text, old, new):
+        if not old:
+            return text
+
+        lower_text = text.lower()
+        lower_old = old.lower()
+        result_parts = []
+        index = 0
+        old_len = len(old)
+
+        while True:
+            found_index = lower_text.find(lower_old, index)
+            if found_index == -1:
+                result_parts.append(text[index:])
+                break
+            result_parts.append(text[index:found_index])
+            result_parts.append(new)
+            index = found_index + old_len
+
+        return "".join(result_parts)
+
+    def _rewrite_stored_character(self, name: str, character: str):
+        try:
+            user_profile = core.storage.StorageDict("character_user", "json")
+            user_name = user_profile.get("name", "user")
+        except Exception:
+            user_name = "user"
+
+        replacement_map = {
+            "{{char}}": name,
+            "{char}": name,
+            "{{user}}": user_name,
+            "{user}": user_name,
+            "you are": f"{name} is",
+            "you should": f"{name} should",
+            "you must": f"{name} must",
+            "you want": f"{name} wants",
+            "you have": f"{name} has"
+        }
+
+        for word, replacement in replacement_map.items():
+            character = self._case_insensitive_replace(character, word, replacement)
+
+        return character
+
+    def _get_stored_character_prompt(self, character_name: str):
+        if not character_name:
+            return None
+
+        try:
+            characters = core.storage.StorageDict("characters", "json")
+            user_profile = core.storage.StorageDict("character_user", "json")
+        except Exception as e:
+            self.log("character", f"Failed to read stored character: {core.detail_error(e)}")
+            return None
+
+        stored_name = None
+        for name in characters.keys():
+            if name.lower().strip() == character_name.lower().strip():
+                stored_name = name
+                break
+
+        if not stored_name:
+            return None
+
+        char_profile = characters.get(stored_name, {}).get("identity", "")
+        char_profile = self._rewrite_stored_character(stored_name, char_profile).replace("\\n", "\n")
+        user_name = user_profile.get("name", "User")
+        return f"You are {stored_name}. You are talking to {user_name}.\n\n{char_profile}"
+
     async def get_system_prompt(self):
         # only run on_system_prompt if the manager has a channel reference
         if not self.channel:
@@ -397,6 +471,9 @@ class Manager:
         active_character = None
         if self.channel:
             active_character = await self.channel.context.chat.get_data("character")
+        fallback_character_prompt = None
+        if active_character and "characters" not in self.modules:
+            fallback_character_prompt = self._get_stored_character_prompt(active_character)
 
         # automatically insert system prompts returned by modules (such as memory)
         sysprompt_top = []
@@ -412,16 +489,19 @@ class Manager:
                 continue
 
             char_modules_exempt = ["characters"]
-            if (
-                self.modules.get("writing_style") and
-                self.modules.get("characters") and
-                self.modules["characters"].config.get("use_writing_style")
-            ):
-                char_modules_exempt.append("writing_style")
 
-            if active_character and module_name not in char_modules_exempt and "characters" in self.modules.keys():
+            if active_character and module_name not in char_modules_exempt:
                 # if a character is currently active, display ONLY the character system prompt
-                char_disable_agent_prompts = self.modules["characters"].config.get("disable_agent_prompts_when_character_active")
+                if "characters" in self.modules:
+                    char_disable_agent_prompts = self.modules["characters"].config.get("disable_agent_prompts_when_character_active")
+                else:
+                    char_disable_agent_prompts = core.config.get(
+                        "modules",
+                        "settings",
+                        "characters",
+                        "disable_agent_prompts_when_character_active",
+                        default=True
+                    )
 
                 if char_disable_agent_prompts:
                     continue
@@ -449,6 +529,8 @@ class Manager:
                     sysprompt_middle.append(prompt_chunk)
 
         system_prompt = sysprompt_top+sysprompt_middle+sysprompt_bottom
+        if fallback_character_prompt:
+            system_prompt.insert(0, f"# Character\n{fallback_character_prompt}")
 
         if system_prompt:
             return "\n\n".join(system_prompt)

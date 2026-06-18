@@ -153,7 +153,12 @@ function renderStreamSegments(msgDiv, onlyUpdateLast = false) {
 
         if (!seg.el || !seg.el.parentNode) {
             seg.el = createSegmentElement(seg);
-            msgDiv.appendChild(seg.el);
+            const metaRow = msgDiv.querySelector('.message-meta-row');
+            if (metaRow) {
+                msgDiv.insertBefore(seg.el, metaRow);
+            } else {
+                msgDiv.appendChild(seg.el);
+            }
         }
 
         if (!onlyUpdateLast || i === streamSegments.length - 1) {
@@ -244,7 +249,10 @@ async function finalizeStreamingUI(aiWrapper, aiMsgDiv) {
     const actualIndex = parseInt(aiWrapper.dataset.index);
     if (!isNaN(actualIndex)) {
         // Get the content for the copy button (rendered text)
-        const content = aiMsgDiv.textContent || '';
+        const contentClone = aiMsgDiv.cloneNode(true);
+        const metaRow = contentClone.querySelector('.message-meta-row');
+        if (metaRow) metaRow.remove();
+        const content = contentClone.textContent || '';
 
         // Find the actions row and update the buttons inside it
         const actionsRow = aiWrapper.querySelector('.actions-stats-row');

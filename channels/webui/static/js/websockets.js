@@ -252,8 +252,20 @@ function handleWebSocketMessage(data) {
     }
 
     if (data.type === 'chat_switched') {
+        if (!data.chat_id) {
+            currentChatId = null;
+            clearChatUI();
+            updateChatTitleBar(null);
+            loadChats();
+            return;
+        }
         if (data.chat_id === currentChatId) return;
         window.loadChat(data.chat_id, catchingUpFromBuffer);
+        return;
+    }
+
+    if (data.type === 'chat_deleted') {
+        handleChatDeleted(data.chat_id, data.active_chat_id);
         return;
     }
 
@@ -369,6 +381,11 @@ function handleWebSocketMessage(data) {
 
     if (data.type === 'chat_metadata_updated') {
         updateChatTitleBar(data.title, data.tags || []);
+        loadChats();
+        return;
+    }
+
+    if (data.type === 'profiles_updated') {
         loadChats();
         return;
     }

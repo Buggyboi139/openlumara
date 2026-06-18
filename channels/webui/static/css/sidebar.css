@@ -151,6 +151,22 @@
     font-weight: 600;
 }
 
+.category-group-header.profile-group-disabled,
+.category-group-content.profile-group-disabled .category-item {
+    opacity: 0.48;
+    filter: grayscale(0.35);
+}
+
+.category-group-content.profile-group-disabled .category-item,
+.category-item.disabled {
+    cursor: not-allowed;
+}
+
+.category-item.disabled:hover {
+    background: transparent;
+    color: var(--text-secondary);
+}
+
 .category-item-icon {
     width: 18px;
     height: 18px;
@@ -160,9 +176,66 @@
 
 .category-item-name {
     flex: 1;
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.category-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    margin-left: auto;
+}
+
+.category-item:hover .category-item-actions,
+.category-item:focus-within .category-item-actions {
+    opacity: 1;
+}
+
+.category-profile-delete {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    background: var(--bg-primary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.category-profile-delete:hover,
+.category-profile-delete:focus {
+    border-color: var(--error);
+    color: var(--error);
+    outline: none;
+}
+
+.category-profile-delete svg {
+    width: 13px;
+    height: 13px;
+}
+
+.category-rename-input {
+    width: 100%;
+    min-width: 0;
+    padding: 2px 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text-primary);
+    font: inherit;
+    outline: none;
+}
+
+.category-rename-input:focus {
+    border-color: var(--accent);
 }
 
 /* -----------------------------------------------------------------------------

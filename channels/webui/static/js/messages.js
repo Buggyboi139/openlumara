@@ -155,6 +155,7 @@ function renderAssistantTurn(messages, index, animate) {
     }
 
     msgDiv.innerHTML = html;
+    appendMessageMeta(msgDiv, messages.find(m => m.role === 'assistant') || messages[0]);
     highlightCode(msgDiv);
 
     wrapper.appendChild(msgDiv);
@@ -169,6 +170,76 @@ function renderAssistantTurn(messages, index, animate) {
     wrapper.appendChild(actions);
 
     chat.insertBefore(wrapper, typing);
+}
+
+function formatMessageTime(timestamp) {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function getMessageTimestamp(msg) {
+    if (!msg) return '';
+    if (msg.created_at) return msg.created_at;
+
+    const injection = typeof msg.injection === 'string' ? msg.injection : '';
+    const match = injection.match(/sent on (.+)$/m);
+    return match ? match[1] : '';
+}
+
+function getMessageProfileLabel(msg) {
+    const profile = msg && msg.profile_context;
+    if (!profile || !profile.name) return '';
+    return profile.name;
+}
+
+function getCurrentProfileContextSnapshot() {
+    if (typeof activeCategory !== 'string') {
+        return { type: '', name: '' };
+    }
+
+    const [prefix, name] = activeCategory.split(':');
+    if (!name) {
+        return { type: '', name: '' };
+    }
+    if (prefix === 'char') {
+        return { type: 'character', name };
+    }
+    if (prefix === 'style') {
+        return { type: 'writing_style', name };
+    }
+    return { type: '', name: '' };
+}
+
+function createTransientMessageMeta() {
+    return {
+        created_at: new Date().toISOString(),
+        profile_context: getCurrentProfileContextSnapshot()
+    };
+}
+
+function appendMessageMeta(msgDiv, msg) {
+    if (!msgDiv || !msg) return;
+
+    const timeText = formatMessageTime(getMessageTimestamp(msg));
+    const profileText = getMessageProfileLabel(msg);
+    if (!timeText && !profileText) return;
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta-row';
+
+    const time = document.createElement('span');
+    time.className = 'message-meta-time';
+    time.textContent = timeText;
+
+    const profile = document.createElement('span');
+    profile.className = 'message-meta-profile';
+    profile.textContent = profileText;
+
+    meta.appendChild(time);
+    meta.appendChild(profile);
+    msgDiv.appendChild(meta);
 }
 
 /**
@@ -307,6 +378,9 @@ function renderSingleMessage(msg, index, animate) {
     }
 
     msgDiv.innerHTML = messageHtml;
+    if ((role === 'user' || role === 'assistant') && !parsed.isAnnouncement && !parsed.isCommandOutput) {
+        appendMessageMeta(msgDiv, msg);
+    }
 
     // Highlight code if not announcement/command
     if (!parsed.isAnnouncement && !parsed.isCommandOutput && !wrapperClass.includes('command')) {

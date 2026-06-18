@@ -29,6 +29,7 @@ default_config = {
         "max_output_tokens": 8192,
         "max_messages": 200,
         "use_developer_role": False,
+        "validate_connection_on_startup": False,
         "custom_fields": {}
     },
     "model": {

@@ -173,13 +173,87 @@ class WritingStyle(core.module.Module):
         "custom_desire": {
             "default": None,
             "description": "Define a custom desire for the AI. Only used if desire is set to custom!"
+        },
+        "custom_name": {
+            "default": "",
+            "description": "Save these writing style settings under this name so it appears in the Writing Style sidebar."
         }
     }
 
-    async def on_system_prompt(self):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.styles = core.storage.StorageDict("writing_styles", "json")
+        self._seed_configured_style()
+
+    def _setting_default(self, key: str):
+        setting = self.settings.get(key, {})
+        return setting.get("default")
+
+    def _current_config_style(self):
+        style = {}
+        for key in self._style_setting_keys():
+            value = self.config.get(key)
+            if value != self._setting_default(key):
+                style[key] = value
+        return style
+
+    def _style_setting_keys(self):
+        return [key for key in self.settings.keys() if key != "custom_name"]
+
+    def _seed_configured_style(self):
+        if self.styles:
+            return
+
+        configured_style = self._current_config_style()
+        self.styles["Configured Style"] = configured_style
+        self.styles.save()
+
+    def _style_storage(self):
+        self.styles = core.storage.StorageDict("writing_styles", "json")
+        return self.styles
+
+    def _valid_style_fields(self, style_data: dict):
+        if not isinstance(style_data, dict):
+            return {}
+
+        return {
+            key: value
+            for key, value in style_data.items()
+            if key in self._style_setting_keys()
+        }
+
+    def _find_style(self, name: str):
+        if not name:
+            return None
+
+        styles = self._style_storage()
+        for style_name in styles.keys():
+            if style_name.lower().strip() == name.lower().strip():
+                return style_name
+        return None
+
+    async def _active_style_settings(self):
+        if not self.channel:
+            return None
+
+        active_character = await self.channel.context.chat.get_data("character")
+        if active_character:
+            return None
+
+        active_style = await self.channel.context.chat.get_data("writing_style")
+        if not active_style:
+            return None
+
+        style_name = self._find_style(active_style)
+        if not style_name:
+            return {}
+
+        return self._valid_style_fields(self._style_storage().get(style_name, {}))
+
+    def _build_constraints(self, get_setting):
         constraints = []
 
-        style = self.config.get("writing_style")
+        style = get_setting("writing_style") or "default"
         match style:
             case "default":
                 constraints.append("") # so that writing flair is supported even with no style selected
@@ -194,19 +268,22 @@ class WritingStyle(core.module.Module):
             case "formal":
                 constraints.append("Style: Very formal/Business.")
             case "json":
-                constraints[-1] += "Output ONLY json"
+                constraints.append("Output ONLY json")
             case "python":
-                constraints[-1] += "Output ONLY python code"
+                constraints.append("Output ONLY python code")
             case "javascript":
-                constraints[-1] += "Output ONLY javascript code"
+                constraints.append("Output ONLY javascript code")
 
-        flair = self.config.get("writing_flair")
+        if not constraints:
+            constraints.append("")
+
+        flair = get_setting("writing_flair") or "default"
         if style != "default" and flair != "default":
             constraints[-1] += " "
 
         match flair:
             case "custom":
-                custom_flair = self.config.get("custom_writing_flair") or "Not sure"
+                custom_flair = get_setting("custom_writing_flair") or "Not sure"
                 constraints[-1] += custom_flair
             case "spambot":
                 constraints[-1] += "You are always advertising something to the user."
@@ -233,7 +310,7 @@ class WritingStyle(core.module.Module):
             case "morse code":
                 constraints[-1] += "Output all words in morse code format"
 
-        cap_style = self.config.get("capitalization_style")
+        cap_style = get_setting("capitalization_style") or "default"
         match cap_style:
             case "lowercase":
                 constraints.append("Case: Lowercase only")
@@ -246,7 +323,7 @@ class WritingStyle(core.module.Module):
             case "snake_case":
                 constraints.append("Case: snake_case_for_the_entire_response")
 
-        length = self.config.get("writing_length")
+        length = get_setting("writing_length") or "default"
         match length:
             case "one paragraph":
                 constraints.append("Length: Only one paragraph")
@@ -261,7 +338,7 @@ class WritingStyle(core.module.Module):
             case "book":
                 constraints.append("You MUST write your response with the length of an entire book")
 
-        vocab = self.config.get("vocabulary_level")
+        vocab = get_setting("vocabulary_level") or "default"
         match vocab:
             case "simple":
                 constraints.append("Vocabulary: Use simple, everyday language. Avoid flowery buzzwords.")
@@ -276,7 +353,7 @@ class WritingStyle(core.module.Module):
             case "old english":
                 constraints.append("Vocabulary: Use old english language.")
 
-        emoji = self.config.get("emoji_style")
+        emoji = get_setting("emoji_style") or "default"
         match emoji:
             case "none":
                 constraints.append("Emoji: Forbidden.")
@@ -291,10 +368,10 @@ class WritingStyle(core.module.Module):
             case "spam me pls":
                 constraints.append("Emoji: Heavy spam.")
 
-        mood = self.config.get("mood")
+        mood = get_setting("mood") or "default"
         match mood:
             case "custom":
-                custom_mood = self.config.get("custom_mood") or "Annoyed at user for not specifying a custom mood"
+                custom_mood = get_setting("custom_mood") or "Annoyed at user for not specifying a custom mood"
                 constraints.append(f"Mood: {custom_mood}")
             case "happy":
                 constraints.append("Mood: Happy")
@@ -328,10 +405,10 @@ class WritingStyle(core.module.Module):
             case "manic":
                 constraints.append("Mood: Manically happy")
 
-        desire = self.config.get("desire")
+        desire = get_setting("desire") or "default"
         match desire:
             case "custom":
-                custom_desire = self.config.get("custom_desire") or "Not sure"
+                custom_desire = get_setting("custom_desire") or "Not sure"
                 constraints.append(f"Desire: {custom_desire}")
             case "helpful":
                 constraints.append("Desire: Help the user")
@@ -348,33 +425,168 @@ class WritingStyle(core.module.Module):
             case "you":
                 constraints.append("Desire: The user")
 
-        l_style = self.config.get("list_style")
+        l_style = get_setting("list_style") or "default"
         match l_style:
             case "none":
                 constraints.append("No lists")
             case "no bold headers":
                 constraints.append("Lists: No bold headers at start of items.")
 
-        if self.config.get("forbid_em_dash"):
+        if get_setting("forbid_em_dash"):
             constraints.append("No Em dashes (—).")
 
-        if self.config.get("forbid_markdown"):
+        if get_setting("forbid_markdown"):
             constraints.append("Don't use markdown")
         else:
-            if self.config.get("forbid_tables"):
+            if get_setting("forbid_tables"):
                 constraints.append("No tables")
 
-            if self.config.get("forbid_headers"):
+            if get_setting("forbid_headers"):
                 constraints.append("No headers")
 
-        if self.config.get("forbid_negative_parallelism"):
+        if get_setting("forbid_negative_parallelism"):
             constraints.append("No negative parallelism (e.g., 'Not just X, but Y').")
 
-        if self.config.get("forbid_relentless_praise"):
+        if get_setting("forbid_relentless_praise"):
             constraints.append("No excessive user praise (e.g., 'You're absolutely right!').")
 
+        constraints = [constraint for constraint in constraints if constraint]
         if not constraints:
             return None
 
         return "- "+"\n- ".join(constraints)
 
+    async def on_system_prompt(self):
+        active_style_settings = await self._active_style_settings()
+
+        if active_style_settings is not None:
+            return self._build_constraints(
+                lambda key: active_style_settings.get(key, self._setting_default(key))
+            )
+
+        return self._build_constraints(lambda key: self.config.get(key))
+
+    @core.module.command("writing_style", help={
+        "": "show current writing style",
+        "<name>": "switch to saved writing style <name>",
+        "reset": "switch back to global/default writing style"
+    })
+    async def cmd_switch(self, args: list):
+        name = " ".join(args)
+        if not name:
+            active_style = await self.channel.context.chat.get_data("writing_style")
+            if active_style:
+                return f"currently active writing style: {active_style}"
+            return "please provide a writing style name."
+
+        if name in ("reset", "default"):
+            await self.reset()
+            return "writing style has been reset to default"
+
+        result = await self.switch(name)
+        return result.get("content")
+
+    async def get_all(self):
+        """Returns all saved writing style preset names."""
+        return self.result(sorted(self._style_storage().keys()))
+
+    async def switch(self, name: str):
+        """Switches to a saved writing style preset. Use this if user requests a style change."""
+        style_name = self._find_style(name)
+        if not style_name:
+            return self.result("writing style not found", False)
+
+        await self.channel.context.chat.set_data("writing_style", style_name)
+        await self.channel.context.chat.set_data("character", "")
+        return self.result(f"writing style switched to {style_name}")
+
+    async def reset(self):
+        """Switches back to the global/default writing style."""
+        await self.channel.context.chat.set_data("writing_style", "")
+        return self.result("writing style reset")
+
+    async def add(self, name: str, settings: dict):
+        """Adds a saved writing style preset using structured writing_style module settings."""
+        name = (name or "").strip()
+        if not name:
+            return self.result("writing style name cannot be empty", False)
+        if self._find_style(name):
+            return self.result("writing style already exists", False)
+
+        style_settings = self._valid_style_fields(settings)
+        if not style_settings:
+            return self.result("writing style settings cannot be empty", False)
+
+        styles = self._style_storage()
+        styles[name] = style_settings
+        styles.save()
+        return self.result("writing style added")
+
+    async def read(self, name: str):
+        """Reads a saved writing style preset."""
+        style_name = self._find_style(name)
+        if not style_name:
+            return self.result("writing style does not exist", False)
+        return self.result(self._style_storage().get(style_name, {}))
+
+    async def edit(self, name: str, settings: dict):
+        """Fully replaces a saved writing style preset with structured writing_style module settings."""
+        style_name = self._find_style(name)
+        if not style_name:
+            return self.result("writing style does not exist", False)
+
+        style_settings = self._valid_style_fields(settings)
+        if not style_settings:
+            return self.result("writing style settings cannot be empty", False)
+
+        styles = self._style_storage()
+        styles[style_name] = style_settings
+        styles.save()
+        return self.result("writing style edited")
+
+    async def rename(self, old_name: str, new_name: str):
+        """Renames a saved writing style preset and updates chats using that preset."""
+        old_name = self._find_style(old_name)
+        new_name = (new_name or "").strip()
+
+        if not old_name:
+            return self.result("writing style does not exist", False)
+        if not new_name:
+            return self.result("new writing style name cannot be empty", False)
+        if self._find_style(new_name):
+            return self.result("a writing style with that name already exists", False)
+
+        styles = self._style_storage()
+        styles[new_name] = styles.pop(old_name)
+        styles.save()
+
+        await self._rename_chat_metadata("writing_style", old_name, new_name)
+        return self.result(f"writing style renamed to {new_name}")
+
+    async def delete(self, name: str):
+        """Deletes a saved writing style preset."""
+        style_name = self._find_style(name)
+        if not style_name:
+            return self.result("writing style does not exist", False)
+
+        styles = self._style_storage()
+        styles.pop(style_name, None)
+        styles.save()
+        return self.result(f"writing style {style_name} deleted")
+
+    async def _rename_chat_metadata(self, key: str, old_value: str, new_value: str):
+        if not self.channel:
+            return
+
+        chats = await self.channel.context.chat.get_all()
+        changed = False
+
+        for chat in chats:
+            custom_data = chat.get("custom_data", {})
+            if custom_data.get(key) == old_value:
+                custom_data[key] = new_value
+                chat["custom_data"] = custom_data
+                changed = True
+
+        if changed:
+            chats.save()

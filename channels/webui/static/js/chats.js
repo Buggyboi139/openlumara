@@ -5,6 +5,10 @@
 let activeCategory = 'general'; // Default category
 // OPTIMIZATION: Global map for O(1) chat data lookups (prevents JSON parsing in loops)
 let chatDataMap = new Map();
+let profileModuleStatus = {
+    characters: true,
+    writing_styles: true
+};
 
 let chatSearchInitialized = false;
 
@@ -26,7 +30,8 @@ function setupChatSearch() {
  * and ensure the prefix is in CATEGORY_REGISTRY for styling.
  */
 const METADATA_GROUP_CONFIG = {
-    'char': 'custom_data.character'
+    'char': 'custom_data.character',
+    'style': 'custom_data.writing_style'
 };
 
 /**
@@ -36,12 +41,45 @@ function getNestedValue(obj, path) {
     return path.split('.').reduce((acc, part) => acc && acc[part], obj);
 }
 
+function getProfileKindForCategory(categoryKey) {
+    const [prefix] = categoryKey.split(':');
+    if (prefix === 'char') return 'characters';
+    if (prefix === 'style') return 'writing_styles';
+    return null;
+}
+
+function isProfileCategory(categoryKey) {
+    return !!getProfileKindForCategory(categoryKey);
+}
+
+function isProfileCategoryDisabled(categoryKey) {
+    const kind = getProfileKindForCategory(categoryKey);
+    return !!kind && profileModuleStatus[kind] === false;
+}
+
+function profileNameExists(prefix, name) {
+    if (!name) return false;
+    if (prefix === 'char') {
+        return (allProfiles.characters || []).includes(name);
+    }
+    if (prefix === 'style') {
+        return (allProfiles.writing_styles || []).includes(name);
+    }
+    return true;
+}
+
 const CATEGORY_REGISTRY = {
     'char': {
         icon: ICONS.user,
         class: 'category-character',
         label: (name) => name,
         groupTitle: 'Characters'
+    },
+    'style': {
+        icon: ICONS.edit,
+        class: 'category-writing-style',
+        label: (name) => name,
+        groupTitle: 'Writing Style'
     }
 };
 
@@ -86,13 +124,19 @@ function closeCategoryPane() {
     if (pane) pane.classList.remove('open');
 }
 
-function updateTagsForCategory(categoryKey) {
-    const chatsInCategory = allChats.filter(chat => {
-        if (categoryKey === 'general') {
-            return !chat.category || chat.category === 'general';
+function getCategoryForChat(chat) {
+    if (chat && chat.custom_data) {
+        for (const [prefix, path] of Object.entries(METADATA_GROUP_CONFIG)) {
+            const val = getNestedValue(chat, path);
+            if (val && profileNameExists(prefix, val)) return `${prefix}:${val}`;
         }
-        return chat.category === categoryKey;
-    });
+    }
+
+    return (chat && chat.category) || 'general';
+}
+
+function updateTagsForCategory(categoryKey) {
+    const chatsInCategory = filterChatsByCategory(allChats, categoryKey);
 
     const categoryTags = new Set();
     chatsInCategory.forEach(chat => {
@@ -110,7 +154,44 @@ function updateTagsForCategory(categoryKey) {
     renderTagFilter(sortedTags);
 }
 
-function selectCategory(categoryKey) {
+async function activateProfileCategory(categoryKey) {
+    let payload = { type: 'default' };
+
+    if (categoryKey !== 'general') {
+        const [prefix, id] = categoryKey.split(':');
+        if (!METADATA_GROUP_CONFIG[prefix]) return true;
+        payload = {
+            type: prefix === 'char' ? 'character' : 'writing_style',
+            name: id
+        };
+    }
+
+    try {
+        const response = await fetch('/profiles/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            console.error('Failed to activate profile:', data.detail || response.statusText);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error('Error activating profile:', e);
+        return false;
+    }
+}
+
+async function selectCategory(categoryKey, options = {}) {
+    const shouldActivateProfile = options.activateProfile !== false;
+
+    if (shouldActivateProfile && isProfileCategoryDisabled(categoryKey)) {
+        return;
+    }
+
     activeCategory = categoryKey;
     updateChatPaneTitle(categoryKey);
 
@@ -131,6 +212,15 @@ function selectCategory(categoryKey) {
     
     updateTagsForCategory(categoryKey);
 
+    if (shouldActivateProfile && isProfileCategory(categoryKey)) {
+        await newChat(categoryKey);
+    } else if (shouldActivateProfile) {
+        const activated = await activateProfileCategory(categoryKey);
+        if (activated) {
+            await loadChats();
+        }
+    }
+
     if (window.innerWidth <= 768) {
         closeCategoryPane();
     }
@@ -149,12 +239,20 @@ function updateChatPaneTitle(categoryKey) {
 
 function filterChatsByCategory(chats, categoryKey) {
     if (categoryKey === 'general') {
-        return chats.filter(c => !c.category || c.category === 'general');
+        return chats.filter(c => {
+            const customData = c.custom_data || {};
+            const characterIsSaved = profileNameExists('char', customData.character);
+            const styleIsSaved = profileNameExists('style', customData.writing_style);
+            return (!c.category || c.category === 'general') &&
+                !characterIsSaved &&
+                !styleIsSaved;
+        });
     }
 
     // Check if this is a metadata-driven group (e.g., "char:Bob")
     const [prefix, id] = categoryKey.split(':');
     if (METADATA_GROUP_CONFIG[prefix]) {
+        if (!profileNameExists(prefix, id)) return [];
         const path = METADATA_GROUP_CONFIG[prefix];
         return chats.filter(chat => getNestedValue(chat, path) === id);
     }
@@ -175,6 +273,8 @@ function renderCategoryList(categories) {
     const groups = {};
 
     groups['Chats'] = [];
+    groups['Characters'] = [];
+    groups['Writing Style'] = [];
 
     categories.forEach(catKey => {
         const parsed = parseCategory(catKey);
@@ -187,11 +287,16 @@ function renderCategoryList(categories) {
     if (groups['Chats']) groupNames.unshift('Chats');
 
     groupNames.forEach(groupName => {
-        const header = createCategoryGroupHeader(groupName);
+        const groupDisabled = (
+            (groupName === 'Characters' && profileModuleStatus.characters === false) ||
+            (groupName === 'Writing Style' && profileModuleStatus.writing_styles === false)
+        );
+        const header = createCategoryGroupHeader(groupName, groupDisabled);
         fragment.appendChild(header);
 
         const content = document.createElement('div');
         content.className = 'category-group-content';
+        if (groupDisabled) content.classList.add('profile-group-disabled');
 
         // FIX: Apply collapsed state if found in localStorage
         if (collapsedGroups.has(groupName)) {
@@ -213,7 +318,8 @@ function renderCategoryList(categories) {
             const el = createCategoryElement(
                 item.key,
                 item.parsed.handler.label(item.parsed.name),
-                                             item.parsed.handler.icon
+                                             item.parsed.handler.icon,
+                                             groupDisabled
             );
             content.appendChild(el);
         });
@@ -226,9 +332,13 @@ function renderCategoryList(categories) {
     list.appendChild(fragment);
 }
 
-function createCategoryGroupHeader(name) {
+function createCategoryGroupHeader(name, disabled = false) {
     const header = document.createElement('div');
     header.className = 'category-group-header';
+    if (disabled) {
+        header.classList.add('profile-group-disabled');
+        header.title = `${name} module is disabled`;
+    }
     header.innerHTML = `
     <svg class="chevron" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
     <polyline points="6 9 12 15 18 9"></polyline>
@@ -255,9 +365,15 @@ function createCategoryGroupHeader(name) {
     return header;
 }
 
-function createCategoryElement(key, name, icon) {
+function createCategoryElement(key, name, icon, disabled = false) {
     const btn = document.createElement('button');
     btn.className = 'category-item';
+    const [prefix] = key.split(':');
+    const isProfile = !!METADATA_GROUP_CONFIG[prefix];
+    if (disabled) {
+        btn.classList.add('disabled');
+        btn.title = 'Enable this module to use saved profiles.';
+    }
     if (key === activeCategory) btn.classList.add('active');
     btn.dataset.key = key;
     btn.innerHTML = `
@@ -265,8 +381,37 @@ function createCategoryElement(key, name, icon) {
     <span class="category-item-name">${escapeHtml(name)}</span>
     `;
 
+    if (isProfile) {
+        const actions = document.createElement('span');
+        actions.className = 'category-item-actions';
+
+        const deleteBtn = document.createElement('span');
+        deleteBtn.className = 'category-profile-delete';
+        deleteBtn.innerHTML = ICONS.trash;
+        deleteBtn.setAttribute('role', 'button');
+        deleteBtn.setAttribute('tabindex', '0');
+        deleteBtn.setAttribute('aria-label', `Delete ${name}`);
+        deleteBtn.setAttribute('title', 'Delete');
+        deleteBtn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            deleteProfile(key, name);
+        };
+        deleteBtn.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                deleteProfile(key, name);
+            }
+        };
+
+        actions.appendChild(deleteBtn);
+        btn.appendChild(actions);
+    }
+
     // Allow dropping chats onto this category
     btn.addEventListener('dragover', (e) => {
+        if (disabled) return;
         console.log('Drag over category', key, 'classList:', btn.classList);
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
@@ -281,6 +426,7 @@ function createCategoryElement(key, name, icon) {
     });
 
     btn.addEventListener('drop', async (e) => {
+        if (disabled) return;
         e.preventDefault();
         e.stopPropagation();
         btn.classList.remove('drag-over');
@@ -290,8 +436,134 @@ function createCategoryElement(key, name, icon) {
         }
     });
 
-    btn.onclick = () => selectCategory(key);
+    btn.onclick = () => {
+        if (!disabled) selectCategory(key);
+    };
+
+    if (isProfile && !disabled) {
+        btn.ondblclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            renameProfileInline(btn, key, name);
+        };
+        btn.title = 'Click to switch. Double-click to rename.';
+    }
+
     return btn;
+}
+
+async function deleteProfile(key, name) {
+    const [prefix] = key.split(':');
+    const profileType = prefix === 'char' ? 'character' : 'writing_style';
+    const label = profileType === 'character' ? 'character' : 'writing style';
+
+    if (!confirm(`Delete ${label} "${name}"? Chats using it will move back to General.`)) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/profiles/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: profileType,
+                name: name
+            })
+        });
+
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            alert('Failed to delete: ' + (data.detail || response.statusText));
+            return;
+        }
+
+        if (activeCategory === key) {
+            activeCategory = 'general';
+        }
+        await loadChats();
+        await selectCategory(activeCategory, { activateProfile: false });
+    } catch (e) {
+        console.error('Failed to delete profile:', e);
+        alert('Failed to delete profile');
+    }
+}
+
+function renameProfileInline(btn, key, currentName) {
+    const nameEl = btn.querySelector('.category-item-name');
+    if (!nameEl || nameEl.dataset.editing === 'true') return;
+
+    const [prefix] = key.split(':');
+    const profileType = prefix === 'char' ? 'character' : 'writing_style';
+
+    userIsEditing = true;
+    nameEl.dataset.editing = 'true';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'category-rename-input';
+    input.value = currentName;
+    input.setAttribute('aria-label', 'Rename profile');
+
+    const originalContent = nameEl.innerHTML;
+    nameEl.innerHTML = '';
+    nameEl.appendChild(input);
+    input.focus();
+    input.select();
+
+    const cleanup = () => {
+        nameEl.innerHTML = originalContent;
+        delete nameEl.dataset.editing;
+        userIsEditing = false;
+    };
+
+    const saveRename = async () => {
+        const newName = input.value.trim();
+        if (!newName || newName === currentName) {
+            cleanup();
+            return;
+        }
+
+        try {
+            const response = await fetch('/profiles/rename', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: profileType,
+                    old_name: currentName,
+                    new_name: newName
+                })
+            });
+
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                alert('Failed to rename: ' + (data.detail || response.statusText));
+                cleanup();
+                return;
+            }
+
+            activeCategory = `${prefix}:${newName}`;
+            await loadChats();
+        } catch (e) {
+            console.error('Failed to rename profile:', e);
+            cleanup();
+        }
+    };
+
+    input.onclick = (e) => e.stopPropagation();
+    input.ondblclick = (e) => e.stopPropagation();
+    input.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            saveRename();
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            cleanup();
+        }
+    };
+    input.onblur = () => setTimeout(() => {
+        if (nameEl.dataset.editing === 'true') cleanup();
+    }, 100);
 }
 
 function parseCategory(categoryString) {
@@ -325,22 +597,37 @@ function parseCategory(categoryString) {
 async function loadChats() {
     try {
         // OPTIMIZATION: Parallel fetch is good, ensure backend returns summary data only
-        const [chatResponse, tagsResponse] = await Promise.all([
+        const [chatResponse, tagsResponse, charactersResponse, stylesResponse] = await Promise.all([
             fetch('/chats'),
-            fetch('/chat/tags')
+            fetch('/chat/tags'),
+            fetch('/profiles/characters'),
+            fetch('/profiles/writing_styles')
         ]);
 
         const chatData = await chatResponse.json();
         const tagsData = await tagsResponse.json();
+        const charactersData = await charactersResponse.json();
+        const stylesData = await stylesResponse.json();
 
         allTags = tagsData.tags || [];
         allChats = chatData.chats || [];
+        allProfiles = {
+            characters: charactersData.profiles || [],
+            writing_styles: stylesData.profiles || []
+        };
+        profileModuleStatus = {
+            characters: charactersData.module_enabled !== false,
+            writing_styles: stylesData.module_enabled !== false
+        };
 
         // OPTIMIZATION: Store chats in a Map for O(1) access by ID.
         chatDataMap.clear();
         allChats.forEach(chat => chatDataMap.set(chat.id, chat));
 
         const categories = new Set();
+        allProfiles.characters.forEach(name => categories.add(`char:${name}`));
+        allProfiles.writing_styles.forEach(name => categories.add(`style:${name}`));
+
         allChats.forEach(chat => {
             // 1. Standard direct categories
             if (chat.category && chat.category !== 'general') {
@@ -350,15 +637,22 @@ async function loadChats() {
             // 2. Metadata-driven groups (e.g. char:Bob, model:gpt-4)
             for (const [prefix, path] of Object.entries(METADATA_GROUP_CONFIG)) {
                 const val = getNestedValue(chat, path);
-                if (val) {
+                if (val && profileNameExists(prefix, val)) {
                     categories.add(`${prefix}:${val}`);
                 }
             }
         });
 
+        if (isProfileCategory(activeCategory)) {
+            const [prefix, name] = activeCategory.split(':');
+            if (!profileNameExists(prefix, name)) {
+                activeCategory = 'general';
+            }
+        }
+
         renderTagFilter();
         renderCategoryList(Array.from(categories));
-        selectCategory(activeCategory);
+        await selectCategory(activeCategory, { activateProfile: false });
         scrollToActiveChat();
         setupChatSearch();
 
@@ -416,21 +710,7 @@ async function restoreCurrentChat() {
         if (data.success && data.chat && data.chat.id) {
             currentChatId = data.chat.id;
 
-            // Determine the effective category (handling metadata dynamically)
-            let chatCategory = 'general';
-            if (data.chat.category && data.chat.category !== 'general') {
-                chatCategory = data.chat.category;
-            } else {
-                for (const [prefix, path] of Object.entries(METADATA_GROUP_CONFIG)) {
-                    const val = getNestedValue(data.chat, path);
-                    if (val) {
-                        chatCategory = `${prefix}:${val}`;
-                        break;
-                    }
-                }
-            }
-            
-            activeCategory = chatCategory;
+            activeCategory = getCategoryForChat(data.chat);
 
             // Ensure the chat list is actually loaded/rendered in the sidebar
             await loadChats();
@@ -769,6 +1049,30 @@ async function moveChatToCategory(chatId, newCategory) {
     if (!chatId || !newCategory) return;
 
     try {
+        const [prefix, id] = newCategory.split(':');
+        if (METADATA_GROUP_CONFIG[prefix]) {
+            const path = METADATA_GROUP_CONFIG[prefix];
+            const parts = path.split('.');
+            const key = parts[parts.length - 1];
+
+            const response = await fetch('/chat/update_metadata', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: chatId,
+                    metadata: { [key]: id }
+                })
+            });
+
+            const data = await response.json();
+            if (data.success) {
+                await loadChats();
+            } else {
+                console.error('Failed to move chat:', data.error);
+            }
+            return;
+        }
+
         const response = await fetch('/chat/update_category', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -788,13 +1092,21 @@ async function moveChatToCategory(chatId, newCategory) {
     }
 }
 
-async function newChat() {
+async function newChat(categoryOverride = null) {
     if (isStreaming) await stopGeneration();
     try {
-        const [prefix, id] = activeCategory.split(':');
+        if (categoryOverride && isProfileCategoryDisabled(categoryOverride)) {
+            return;
+        }
+
+        let targetCategory = categoryOverride || activeCategory;
+        if (!categoryOverride && isProfileCategoryDisabled(targetCategory)) {
+            targetCategory = 'general';
+        }
+        const [prefix, id] = targetCategory.split(':');
         const isMetadataGroup = prefix && METADATA_GROUP_CONFIG[prefix];
         
-        let category = activeCategory;
+        let category = targetCategory;
         let metadata = {};
 
         if (isMetadataGroup) {
@@ -818,10 +1130,11 @@ async function newChat() {
         const data = await response.json();
 
         if (data.success && data.chat) {
+            activeCategory = targetCategory;
             await loadChats();
             // Force the sidebar to stay on the current active category 
             // in case loadChats() or selectCategory() reset it.
-            selectCategory(activeCategory);
+            await selectCategory(activeCategory, { activateProfile: false });
             await loadChat(data.chat.id);
         }
     } catch (e) {
@@ -949,8 +1262,9 @@ async function loadChat(chatId, onlyUpToUserMessage = false) {
             updateTokenUsage();
             closeSidebar();
 
-            const chatCategory = data.chat.category || 'general';
+            const chatCategory = getCategoryForChat(data.chat);
             if (chatCategory !== activeCategory) {
+                activeCategory = chatCategory;
                 await loadChats();
             } else {
                 updateSidebarActiveChat(chatId);
@@ -978,6 +1292,30 @@ function updateSidebarActiveChat(chatId) {
     if (newActive) {
         newActive.classList.add('active');
     }
+}
+
+function handleChatDeleted(chatId, activeChatId = null) {
+    allChats = allChats.filter(chat => chat.id !== chatId);
+    chatDataMap.delete(chatId);
+
+    const chatItem = document.querySelector(`.chat-item[data-chat-id="${chatId}"]`);
+    if (chatItem) chatItem.remove();
+
+    if (currentChatId === chatId) {
+        currentChatId = null;
+        clearChatUI();
+        updateChatTitleBar(null);
+    }
+
+    if (activeChatId) {
+        if (activeChatId === currentChatId) {
+            updateSidebarActiveChat(activeChatId);
+        }
+    } else if (!allChats.length) {
+        selectCategory(activeCategory, { activateProfile: false });
+    }
+
+    loadChats();
 }
 
 // Note: Chats are auto-saved by the backend when messages are added.
@@ -1157,7 +1495,7 @@ async function renameChat(chatId, currentTitle) {
                 }
         }, 100);
     };
-}2
+}
 
 // =============================================================================
 // Chat Title Bar Management

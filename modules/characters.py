@@ -13,8 +13,8 @@ class Characters(core.module.Module):
             "description": "Automatically disables all prompts from other modules when a character is active, so that the only thing in the system prompt is the character definition. This can help a lot with making characters behave purely like characters, and less like, well, personal assistants."
         },
         "use_writing_style": {
-            "description": "Whether to use the writing style defined by the `writing style` module for characters. This will add that module's prompt to the character prompt even if agent prompts are disabled, making all your characters use your preferred writing style setup",
-            "default": True
+            "description": "Deprecated compatibility setting. Writing styles are now independent from characters and are not applied while a character is active.",
+            "default": False
         }
     }
 
@@ -124,6 +124,7 @@ class Characters(core.module.Module):
             return self.result("character not found", False)
         character = self.characters.get(name)
         await self.channel.context.chat.set_data("character", name)
+        await self.channel.context.chat.set_data("writing_style", "")
 
         self.active = True
 
@@ -136,6 +137,41 @@ class Characters(core.module.Module):
         await self.channel.context.chat.set_data("character", "")
         self.active = False
         return "success"
+
+    async def rename(self, old_name: str, new_name: str):
+        """Renames an existing character and updates chats using that character."""
+        old_name = self._find_character(old_name)
+        new_name = (new_name or "").strip()
+
+        if not old_name:
+            return self.result("character doesn't exist!", False)
+        if not new_name:
+            return self.result("new character name cannot be empty", False)
+        if self._find_character(new_name):
+            return self.result("a character with that name already exists", False)
+
+        self.characters[new_name] = self.characters.pop(old_name)
+        self.characters.save()
+
+        await self._rename_chat_metadata("character", old_name, new_name)
+        return self.result(f"character renamed to {new_name}")
+
+    async def _rename_chat_metadata(self, key: str, old_value: str, new_value: str):
+        if not self.channel:
+            return
+
+        chats = await self.channel.context.chat.get_all()
+        changed = False
+
+        for chat in chats:
+            custom_data = chat.get("custom_data", {})
+            if custom_data.get(key) == old_value:
+                custom_data[key] = new_value
+                chat["custom_data"] = custom_data
+                changed = True
+
+        if changed:
+            chats.save()
 
     def _case_insensitive_replace(self, text, old, new):
         """Replaces all occurrences of 'old' with 'new' in 'text', ignoring case."""

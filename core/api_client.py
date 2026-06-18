@@ -28,6 +28,7 @@ class APIClient():
         # used for insecure SSL connections
         self._httpx_client = None
 
+        self._connection_validated = False
         self.supports_developer_role = False
 
     def _get_user_friendly_message(self, error_type, exception=None):
@@ -62,8 +63,35 @@ class APIClient():
 
         return result
 
-    async def connect(self):
+    async def connect(self, validate: bool = False):
         if self.connected:
+            if not validate or self._connection_validated:
+                return True
+
+            try:
+                await self._AI.models.list()
+                self._connection_validated = True
+                self._connection_error = None
+                return True
+            except openai.AuthenticationError as e:
+                await self.disconnect()
+                error_info = self._get_user_friendly_message("auth_failed", e)
+                self._connection_error = error_info["message"]
+                self.manager.log("API", f"Authentication failed: {e}")
+                return False
+            except openai.APIConnectionError as e:
+                await self.disconnect()
+                error_info = self._get_user_friendly_message("connection_lost", e)
+                self._connection_error = error_info["message"]
+                self.manager.log("API", f"Connection failed: {e}")
+                return False
+            except Exception as e:
+                await self.disconnect()
+                error_info = self._get_user_friendly_message("unknown", e)
+                self._connection_error = error_info["message"]
+                self.manager.log("API", f"Unexpected connection error: {e}")
+                return False
+
             return True
 
         self._model = core.config.get("model", "name")
@@ -81,7 +109,10 @@ class APIClient():
                 api_key=api_config.get("key"),
                 http_client=self._httpx_client
             )
-            await self._AI.models.list()
+
+            if validate:
+                await self._AI.models.list()
+                self._connection_validated = True
 
         except openai.BadRequestError as e:
             # Check if the error message specifically mentions the model is not found
@@ -117,9 +148,14 @@ class APIClient():
         self.connected = True
         self._connection_error = None
         self._connection_attempts = 0
+        if not validate:
+            self._connection_validated = False
         self.supports_developer_role = core.config.get("api", "use_developer_role", default=False)
 
-        self.manager.log("API", "Successfully connected to AI")
+        if validate:
+            self.manager.log("API", "Successfully connected to AI")
+        else:
+            self.manager.log("API", "AI client initialized")
         return True
 
     def get_connection_status(self):
@@ -128,6 +164,7 @@ class APIClient():
 
         return {
             "connected": self.connected,
+            "validated": self._connection_validated,
             "error": self._connection_error,
             "url": api_config.get("url"),
             "model": self._model,
@@ -144,14 +181,15 @@ class APIClient():
             self._httpx_client = None
 
         self.connected = False
+        self._connection_validated = False
         self._AI = None
         self.manager.log("API", "Disconnected from API")
         return True
 
-    async def reconnect(self):
+    async def reconnect(self, validate: bool = True):
         """disconnect and reconnect to the API"""
         await self.disconnect()
-        return await self.connect()
+        return await self.connect(validate=validate)
 
     def get_model(self):
         return self._model
@@ -541,13 +579,17 @@ class APIClient():
 
     async def list_models(self):
         if not self.connected:
-            return []
+            connected = await self.connect()
+            if not connected:
+                return []
 
         try:
             # get alphabetically sorted model list
             models = await self._AI.models.list()
             models_list = [model.id for model in models.data]
             models_list.sort()
+            self._connection_validated = True
+            self._connection_error = None
 
         except Exception as e:
             self.manager.log_error("error while retrieving model list", e)

@@ -77,11 +77,41 @@ class Chat:
                 return False
         return True
 
-    def _set_current(self, index: int):
+    def _set_current(self, index: int | None):
         self.current = index
         # store current index into a simple file
+        if index is None:
+            if os.path.exists(self.current_save_path):
+                os.remove(self.current_save_path)
+            return
+
         with open(self.current_save_path, "w") as f:
             f.write(str(index))
+
+    def _current_is_valid(self):
+        return (
+            self.current is not None
+            and isinstance(self.current, int)
+            and 0 <= self.current < len(self.data)
+        )
+
+    async def _ensure_current(self, create: bool = False):
+        if self._current_is_valid():
+            return True
+
+        if self.data:
+            if isinstance(self.current, int) and self.current >= len(self.data):
+                self._set_current(len(self.data) - 1)
+            else:
+                self._set_current(0)
+            return True
+
+        self._set_current(None)
+        if create:
+            await self.new()
+            return True
+
+        return False
 
     def _find_index(self, id: str):
         """find index of the chat with that ID"""
@@ -114,7 +144,7 @@ class Chat:
         self.data.save()
         return True
     async def clear(self):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         self.data[self.current]["messages"] = []
@@ -138,20 +168,19 @@ class Chat:
         self.data.pop(index)
         self.data.save()
 
-        # Adjust current index if needed
-        if self.current:
+        # Adjust current index if needed. Index 0 is a valid current chat.
+        if self.current is not None:
             if self.current == index:
                 # Deleted the current chat - reset or move to previous
                 self._set_current(min(index, len(self.data) - 1) if self.data else None)
             elif self.current > index:
                 # Current was after deleted item, shift down
-                self.current -= 1
+                self._set_current(self.current - 1)
 
         return self.current
 
     async def save(self):
-        if self.current is None:
-            await self.new()
+        await self._ensure_current(create=True)
 
         return self.data.save()
     async def load(self, id: str):
@@ -169,12 +198,12 @@ class Chat:
         return self.data
 
     async def get_title(self):
-        if self.current is None:
+        if not await self._ensure_current():
             return None
         return self.data[self.current].get("title")
 
     async def set_title(self, title: str):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         self.data[self.current]["title"] = title
@@ -182,14 +211,14 @@ class Chat:
         return True
 
     async def set_category(self, category: str):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         self.data[self.current]["category"] = category
         await self.save()
         return True
     async def get_category(self):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
         return self.data[self.current].get("category", "")
     async def get_categories(self):
@@ -201,7 +230,7 @@ class Chat:
         return collected_categories
 
     async def get_data(self, data_key: str = None):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         if not data_key:
@@ -210,7 +239,7 @@ class Chat:
         # return the data, or None if not found
         return self.data[self.current].get("custom_data", {}).get(data_key, None)
     async def set_data(self, data_key: str, data_value):
-        if self.current is None:
+        if not await self._ensure_current(create=True):
             return False
 
         self.data[self.current]["custom_data"][data_key] = data_value
@@ -218,7 +247,7 @@ class Chat:
         return True
 
     async def set_tags(self, tags: list):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         self.data[self.current]["tags"] = tags
@@ -226,13 +255,13 @@ class Chat:
         return True
 
     async def get_tags(self):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         return self.data[self.current].get("tags", [])
 
     async def add_tag(self, tag: str):
-        if self.current is None:
+        if not await self._ensure_current(create=True):
             return False
 
         if tag not in self.data[self.current]["tags"]:
@@ -243,7 +272,7 @@ class Chat:
         return False
 
     async def pop_tag(self, tag: str):
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         if tag in self.data[self.current]["tags"]:
@@ -255,31 +284,30 @@ class Chat:
 
     async def get(self, index = None):
         """get message history of current chat"""
-        if self.current is None:
-            return await self.new()
+        await self._ensure_current(create=True)
 
         messages = self.data[self.current].get("messages", [])
         return messages
 
     async def get_id(self):
-        if self.current is None:
+        if not await self._ensure_current():
             return None
 
         return self.data[self.current].get("id", None)
 
     async def get_message(self, index: int):
-        if not self.current:
+        if not await self._ensure_current():
             return None
 
         messages = self.data[self.current]["messages"]
 
-        if index > len(messages):
+        if index < 0 or index >= len(messages):
             return None
 
         return messages[index]
 
     async def get_last_message_with_role(self, role: str, cutoff_index: int = None):
-        if not self.current:
+        if not await self._ensure_current():
             return False
 
         # get last message by that role
@@ -317,7 +345,7 @@ class Chat:
         """
         Deletes all messages below a certain index
         """
-        if self.current is None:
+        if not await self._ensure_current():
             return False
 
         messages = await self.get()
@@ -332,8 +360,7 @@ class Chat:
 
     async def set(self, messages: list):
         """overwrite message history of current chat"""
-        if self.current is None:
-            await self.new()
+        await self._ensure_current(create=True)
 
         self.data[self.current]["messages"] = messages
         await self.save()
@@ -341,11 +368,30 @@ class Chat:
 
     async def add(self, message: dict, ghost = False):
         """add message to current chat"""
-        if self.current is None:
-            await self.new()
+        await self._ensure_current(create=True)
 
         # make a copy so we don't modify the original reference
         new_message = message.copy()
+        new_message.setdefault("created_at", datetime.datetime.now(datetime.timezone.utc).isoformat())
+
+        custom_data = self.data[self.current].get("custom_data", {}) or {}
+        active_character = custom_data.get("character")
+        active_writing_style = custom_data.get("writing_style")
+        if active_character:
+            new_message.setdefault("profile_context", {
+                "type": "character",
+                "name": active_character
+            })
+        elif active_writing_style:
+            new_message.setdefault("profile_context", {
+                "type": "writing_style",
+                "name": active_writing_style
+            })
+        else:
+            new_message.setdefault("profile_context", {
+                "type": "",
+                "name": ""
+            })
 
         if not self.data[self.current]["title"].strip():
             # auto-set title
@@ -383,8 +429,7 @@ class Chat:
 
     async def pop(self, index: int = None):
         """pop message from current chat"""
-        if self.current is None:
-            await self.new()
+        await self._ensure_current(create=True)
 
         if index is None:
             index = -1
@@ -404,9 +449,11 @@ class Chat:
         if not self.using_api_token_data:
             return await self.count_tokens()
 
+        await self._ensure_current(create=True)
         return self.data[self.current]["token_usage"]
 
     async def set_token_usage(self, usage: int):
+        await self._ensure_current(create=True)
         self.data[self.current]["token_usage"] = usage
         self.data.save()
 

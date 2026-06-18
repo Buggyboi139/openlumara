@@ -1056,6 +1056,30 @@
     text-align: center;
 }
 
+.message-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 6px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    opacity: 0.82;
+}
+
+.message-meta-time,
+.message-meta-profile {
+    min-width: 0;
+}
+
+.message-meta-profile {
+    margin-left: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 55%;
+}
+
 .message .index-badge {
     font-size: 0.65rem;
     color: var(--text-muted);

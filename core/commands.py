@@ -384,10 +384,11 @@ class Commands:
                         return "chat loaded"
 
             case "connect":
-                if self.channel.manager.API.connected:
+                status = self.channel.manager.API.get_connection_status()
+                if status["connected"] and status.get("validated"):
                     return "Already connected."
 
-                result = await self.channel.manager.API.connect()
+                result = await self.channel.manager.API.connect(validate=True)
                 if not result:
                     return f"error connecting to API: {self.channel.manager.API.get_last_error()}"
 

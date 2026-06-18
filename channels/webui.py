@@ -335,7 +335,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         manager.active_stream_task.cancel()
                     
                     # Create new chat
-                    new_id = await channel_instance.context.chat.new_chat()
+                    await channel_instance.context.chat.new()
+                    new_id = await channel_instance.context.chat.get_id()
                     manager.active_chat_id = new_id
                     
                     # Broadcast the switch
@@ -351,11 +352,27 @@ async def websocket_endpoint(websocket: WebSocket):
                         return False
 
                     # delete the chat
-                    await channel_instance.context.chat.delete(chat_id)
+                    success = await channel_instance.context.chat.delete(chat_id)
+                    if success is False:
+                        await manager.broadcast({
+                            "type": "error",
+                            "error": "Chat not found."
+                        })
+                        continue
+
+                    active_chat_id = await channel_instance.context.chat.get_id()
+                    manager.active_chat_id = active_chat_id
+
+                    await manager.broadcast({
+                        "type": "chat_deleted",
+                        "chat_id": chat_id,
+                        "active_chat_id": active_chat_id
+                    })
+
                     # the chat class manages the switch to the chat before the deleted one
                     await manager.broadcast({
                         "type": "chat_switched",
-                        "chat_id": channel_instance.context.chat.current,
+                        "chat_id": active_chat_id,
                         "buffer": []
                     })
                 
@@ -383,7 +400,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await channel_instance.context.chat.delete_from(index-1)
                     await manager.broadcast({
                         "type": "messages_updated",
-                        "messages": await channel_instance.context.chat.get()
+                        "messages": await _decorated_current_messages()
                     })
 
                 elif msg_type == "message_regenerate":
@@ -398,7 +415,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             # 1. Broadcast update to sync UI (removes the old assistant message)
                             await manager.broadcast({
                                 "type": "messages_updated",
-                                "messages": await channel_instance.context.chat.get()
+                                "messages": await _decorated_current_messages()
                             })
                             # 2. Start the new stream using the user content
                             await start_ai_stream_task(await channel_instance.context.chat.get_id(), user_message)
@@ -494,7 +511,8 @@ async def require_auth(request: Request):
 # Define paths that don't require authentication
 PUBLIC_PATHS = {
     '/login', '/api/login', '/api/health',
-    '/manifest.json', '/sw.js', '/icon-192.png', '/icon-512.png'
+    '/manifest.json', '/sw.js',
+    '/openlumara-favicon.ico', '/openlumara-icon-192.png', '/openlumara-icon-512.png'
 }
 
 @app.middleware("http")
@@ -530,6 +548,7 @@ async def require_login_middleware(request: Request, call_next):
         request.url.path.startswith('/cancel') or
         request.url.path.startswith('/upload') or
         request.url.path.startswith('/chat') or
+        request.url.path.startswith('/profiles') or
         request.url.path.startswith('/storage') or
         request.url.path.startswith('/settings') or
         request.url.path.startswith('/server') or
@@ -723,8 +742,6 @@ async def api_disconnect(user: str = Depends(require_auth)):
 async def list_models(user: str = Depends(require_auth)):
     if not channel_instance:
         raise HTTPException(status_code=500, detail="Channel not available")
-    if not channel_instance.manager.API.connected:
-        raise HTTPException(status_code=503, detail="Not connected to API")
     try:
         models = await channel_instance.manager.API.list_models()
         return {'models': models}
@@ -741,8 +758,7 @@ async def get_messages(user: str = Depends(require_auth)):
 
     current_id = await channel_instance.context.chat.get_id()
 
-    for i, msg in enumerate(messages):
-        msg['index'] = i
+    messages = _decorate_messages_for_webui(messages, custom_data)
 
     return {'messages': messages, 'count': len(messages), 'current_chat_id': current_id}
 
@@ -758,8 +774,7 @@ async def get_messages_since(index: int = 0, user: str = Depends(require_auth)):
     current_title = await channel_instance.context.chat.get_title()
     current_tags = await channel_instance.context.chat.get_tags() or []
 
-    for i, msg in enumerate(messages):
-        msg['index'] = i
+    messages = _decorate_messages_for_webui(messages, custom_data)
 
     messages_slice = messages[index:]
 
@@ -892,7 +907,7 @@ async def edit_message(request: Request, user: str = Depends(require_auth)):
         if messages[index].get('role') in ('user', 'assistant'):
             messages[index]['content'] = new_content
             await channel_instance.context.chat.set(messages)
-            await manager.broadcast({"type": "messages_updated", "messages": await channel_instance.context.chat.get()})
+            await manager.broadcast({"type": "messages_updated", "messages": await _decorated_current_messages()})
             return {'success': True, 'total': len(messages)}
         return {'success': False, 'error': 'Cannot edit this message type'}
     return {'success': False, 'error': f'Index {index} out of range'}
@@ -907,7 +922,7 @@ async def delete_message(request: Request, user: str = Depends(require_auth)):
         if messages[index].get('role') in ('user', 'assistant', 'command', 'command_response') or messages[index].get('role', '').startswith('announce_'):
             await channel_instance.context.chat.delete_from(index)
             remaining = len(await channel_instance.context.chat.get())
-            await manager.broadcast({"type": "messages_updated", "messages": await channel_instance.context.chat.get()})
+            await manager.broadcast({"type": "messages_updated", "messages": await _decorated_current_messages()})
             return {'success': True, 'remaining': remaining}
     return {'success': False, 'error': f'Index {index} out of range'}
 
@@ -949,6 +964,404 @@ async def upload_file(request: Request, user: str = Depends(require_auth)):
 # Chat Management Routes
 # =============================================================================
 
+PROFILE_METADATA_KEYS = {
+    "char": "character",
+    "character": "character",
+    "style": "writing_style",
+    "writing_style": "writing_style"
+}
+WRITING_STYLE_PROFILE_NAME_KEY = "custom_name"
+
+def _chat_matches_category(chat: dict, category: str):
+    if not category or category == 'general':
+        custom_data = chat.get('custom_data', {}) or {}
+        return (
+            (not chat.get('category') or chat.get('category') == 'general')
+            and not custom_data.get('character')
+            and not custom_data.get('writing_style')
+        )
+
+    if ':' in category:
+        prefix, value = category.split(':', 1)
+        metadata_key = PROFILE_METADATA_KEYS.get(prefix)
+        if metadata_key:
+            return (chat.get('custom_data', {}) or {}).get(metadata_key) == value
+
+    return chat.get('category') == category
+
+def _profile_module(name: str):
+    if not channel_instance:
+        return None
+    return channel_instance.manager.modules.get(name)
+
+def _module_enabled(name: str):
+    if not channel_instance:
+        return False
+    return name in channel_instance.manager.modules
+
+def _storage_keys(name: str):
+    try:
+        return sorted(core.storage.StorageDict(name, "json").keys())
+    except Exception as e:
+        if channel_instance:
+            channel_instance.log("webui", f"Failed to read {name}.json: {core.detail_error(e)}")
+        return []
+
+def _seed_configured_writing_style():
+    try:
+        storage = core.storage.StorageDict("writing_styles", "json")
+        if storage:
+            return
+
+        module = _profile_module("writing_style")
+        if not module or not hasattr(module, "settings"):
+            return
+
+        configured_style = {}
+        for key, setting in module.settings.items():
+            if key == WRITING_STYLE_PROFILE_NAME_KEY:
+                continue
+            value = module.config.get(key)
+            if value != setting.get("default"):
+                configured_style[key] = value
+
+        storage["Configured Style"] = configured_style
+        storage.save()
+    except Exception as e:
+        if channel_instance:
+            channel_instance.log("webui", f"Failed to seed configured writing style: {core.detail_error(e)}")
+
+def _storage_find_key(name: str, key: str):
+    if not key:
+        return None
+    try:
+        storage = core.storage.StorageDict(name, "json")
+        for existing in storage.keys():
+            if existing.lower().strip() == key.lower().strip():
+                return existing
+    except Exception:
+        return None
+    return None
+
+def _rename_storage_key(name: str, old_name: str, new_name: str, metadata_key: str):
+    old_key = _storage_find_key(name, old_name)
+    new_name = (new_name or "").strip()
+
+    if not old_key:
+        return False, f"{metadata_key.replace('_', ' ')} does not exist"
+    if not new_name:
+        return False, "new name cannot be empty"
+    if _storage_find_key(name, new_name):
+        return False, "a profile with that name already exists"
+
+    storage = core.storage.StorageDict(name, "json")
+    storage[new_name] = storage.pop(old_key)
+    storage.save()
+
+    try:
+        chats = channel_instance.context.chat.data
+        changed = False
+        for chat in chats:
+            custom_data = chat.get("custom_data", {})
+            if custom_data.get(metadata_key) == old_key:
+                custom_data[metadata_key] = new_name
+                chat["custom_data"] = custom_data
+                changed = True
+        if changed:
+            chats.save()
+    except Exception as e:
+        channel_instance.log("webui", f"Failed to update profile chat metadata: {core.detail_error(e)}")
+
+    return True, new_name
+
+def _clear_profile_chat_metadata(metadata_key: str, profile_name: str):
+    if not channel_instance or not profile_name:
+        return
+
+    try:
+        chats = channel_instance.context.chat.data
+        changed = False
+        for chat in chats:
+            custom_data = chat.get("custom_data", {}) or {}
+            if custom_data.get(metadata_key) == profile_name:
+                custom_data[metadata_key] = ""
+                chat["custom_data"] = custom_data
+                changed = True
+        if changed:
+            chats.save()
+    except Exception as e:
+        channel_instance.log("webui", f"Failed to clear profile chat metadata: {core.detail_error(e)}")
+
+def _delete_storage_key(name: str, target_name: str, metadata_key: str):
+    storage_key = _storage_find_key(name, target_name)
+    if not storage_key:
+        return False, f"{metadata_key.replace('_', ' ')} does not exist"
+
+    storage = core.storage.StorageDict(name, "json")
+    storage.pop(storage_key, None)
+    storage.save()
+    _clear_profile_chat_metadata(metadata_key, storage_key)
+    return True, storage_key
+
+async def _save_writing_style_from_settings(settings_data: dict):
+    try:
+        style_config = (
+            settings_data.get("modules", {})
+            .get("settings", {})
+            .get("writing_style", {})
+        )
+        if not isinstance(style_config, dict):
+            return None
+
+        style_name = (style_config.get(WRITING_STYLE_PROFILE_NAME_KEY) or "").strip()
+        if not style_name:
+            return None
+
+        module = _profile_module("writing_style")
+        style_settings = {}
+        for key, value in style_config.items():
+            if key == WRITING_STYLE_PROFILE_NAME_KEY:
+                continue
+
+            if module and hasattr(module, "settings"):
+                setting = module.settings.get(key)
+                if not setting:
+                    continue
+                if value == setting.get("default"):
+                    continue
+
+            style_settings[key] = value
+
+        storage = core.storage.StorageDict("writing_styles", "json")
+        target_key = _storage_find_key("writing_styles", style_name)
+        save_key = target_key or style_name
+
+        storage[save_key] = style_settings
+        storage.save()
+
+        if channel_instance.context.chat.current is not None:
+            await channel_instance.context.chat.set_data("writing_style", save_key)
+            await channel_instance.context.chat.set_data("character", "")
+        return save_key
+    except Exception as e:
+        if channel_instance:
+            channel_instance.log("webui", f"Failed to save writing style preset: {core.detail_error(e)}")
+        raise
+
+async def _rename_active_profile_metadata(metadata_key: str, old_value: str, new_value: str):
+    chats = await channel_instance.context.chat.get_all()
+    changed = False
+    for chat in chats:
+        custom_data = chat.get("custom_data", {}) or {}
+        if custom_data.get(metadata_key) == old_value:
+            custom_data[metadata_key] = new_value
+            chat["custom_data"] = custom_data
+            changed = True
+    if changed:
+        chats.save()
+
+async def _active_profiles():
+    custom_data = await channel_instance.context.chat.get_data() or {}
+    return {
+        "character": custom_data.get("character") or "",
+        "writing_style": custom_data.get("writing_style") or ""
+    }
+
+def _profile_context_from_chat_data(custom_data: dict):
+    custom_data = custom_data or {}
+    if custom_data.get("character"):
+        return {"type": "character", "name": custom_data.get("character")}
+    if custom_data.get("writing_style"):
+        return {"type": "writing_style", "name": custom_data.get("writing_style")}
+    return {"type": "", "name": ""}
+
+def _decorate_messages_for_webui(messages: list, custom_data: dict):
+    fallback_profile = _profile_context_from_chat_data(custom_data)
+
+    for i, msg in enumerate(messages):
+        msg["index"] = i
+
+        profile_context = msg.get("profile_context") or {}
+        if fallback_profile.get("name") and not profile_context.get("name"):
+            msg["profile_context"] = fallback_profile
+
+    return messages
+
+async def _decorated_current_messages():
+    messages = copy.deepcopy(await channel_instance.context.chat.get() or [])
+    custom_data = await channel_instance.context.chat.get_data()
+    return _decorate_messages_for_webui(messages, custom_data)
+
+@app.get("/profiles/characters")
+async def list_character_profiles(user: str = Depends(require_auth)):
+    if not channel_instance:
+        return {'profiles': [], 'active': '', 'module_enabled': False}
+
+    await channel_instance._set_as_active_channel()
+    module = _profile_module("characters")
+    profiles = _storage_keys("characters")
+    if module and hasattr(module, "characters"):
+        profiles = sorted(set(profiles) | set(module.characters.keys()))
+
+    active = (await _active_profiles()).get("character", "")
+    return {'profiles': profiles, 'active': active, 'module_enabled': _module_enabled("characters")}
+
+@app.get("/profiles/writing_styles")
+async def list_writing_style_profiles(user: str = Depends(require_auth)):
+    if not channel_instance:
+        return {'profiles': [], 'active': '', 'module_enabled': False}
+
+    await channel_instance._set_as_active_channel()
+    _seed_configured_writing_style()
+    module = _profile_module("writing_style")
+    profiles = _storage_keys("writing_styles")
+    if module and hasattr(module, "styles"):
+        profiles = sorted(set(profiles) | set(module.styles.keys()))
+
+    active = (await _active_profiles()).get("writing_style", "")
+    return {'profiles': profiles, 'active': active, 'module_enabled': _module_enabled("writing_style")}
+
+@app.post("/profiles/activate")
+async def activate_profile(request: Request, user: str = Depends(require_auth)):
+    if not channel_instance:
+        raise HTTPException(status_code=500, detail="Channel not available")
+
+    await channel_instance._set_as_active_channel()
+    data = await request.json() or {}
+    profile_type = (data.get("type") or "").strip()
+    name = (data.get("name") or "").strip()
+
+    if profile_type in ("default", "general", "reset"):
+        await channel_instance.context.chat.set_data("character", "")
+        await channel_instance.context.chat.set_data("writing_style", "")
+    elif profile_type in ("character", "char"):
+        module = _profile_module("characters")
+        if module:
+            result = await module.switch(name)
+            if result.get("status") != "success" and not _storage_find_key("characters", name):
+                raise HTTPException(status_code=404, detail=result.get("content", "Character not found"))
+            elif result.get("status") != "success":
+                canonical_name = _storage_find_key("characters", name)
+                await channel_instance.context.chat.set_data("character", canonical_name)
+                await channel_instance.context.chat.set_data("writing_style", "")
+        else:
+            canonical_name = _storage_find_key("characters", name)
+            if not canonical_name:
+                raise HTTPException(status_code=404, detail="Character not found")
+            await channel_instance.context.chat.set_data("character", canonical_name)
+            await channel_instance.context.chat.set_data("writing_style", "")
+    elif profile_type in ("writing_style", "style"):
+        module = _profile_module("writing_style")
+        if module:
+            result = await module.switch(name)
+            if result.get("status") != "success" and not _storage_find_key("writing_styles", name):
+                raise HTTPException(status_code=404, detail=result.get("content", "Writing style not found"))
+            elif result.get("status") != "success":
+                canonical_name = _storage_find_key("writing_styles", name)
+                await channel_instance.context.chat.set_data("writing_style", canonical_name)
+                await channel_instance.context.chat.set_data("character", "")
+        else:
+            canonical_name = _storage_find_key("writing_styles", name)
+            if not canonical_name:
+                raise HTTPException(status_code=404, detail="Writing style not found")
+            await channel_instance.context.chat.set_data("writing_style", canonical_name)
+            await channel_instance.context.chat.set_data("character", "")
+    else:
+        raise HTTPException(status_code=400, detail="Unknown profile type")
+
+    active_profiles = await _active_profiles()
+    await manager.broadcast({
+        "type": "profiles_updated",
+        "active_profiles": active_profiles
+    })
+    return {'success': True, 'active_profiles': active_profiles}
+
+@app.post("/profiles/rename")
+async def rename_profile(request: Request, user: str = Depends(require_auth)):
+    if not channel_instance:
+        raise HTTPException(status_code=500, detail="Channel not available")
+
+    await channel_instance._set_as_active_channel()
+    data = await request.json() or {}
+    profile_type = (data.get("type") or "").strip()
+    old_name = (data.get("old_name") or "").strip()
+    new_name = (data.get("new_name") or "").strip()
+
+    if profile_type in ("character", "char"):
+        module = _profile_module("characters")
+        storage_name = "characters"
+        metadata_key = "character"
+    elif profile_type in ("writing_style", "style"):
+        module = _profile_module("writing_style")
+        storage_name = "writing_styles"
+        metadata_key = "writing_style"
+    else:
+        raise HTTPException(status_code=400, detail="Unknown profile type")
+
+    if module and hasattr(module, "rename"):
+        result = await module.rename(old_name, new_name)
+        if result.get("status") != "success":
+            success, message = _rename_storage_key(storage_name, old_name, new_name, metadata_key)
+            if not success:
+                raise HTTPException(status_code=400, detail=result.get("content", message))
+    else:
+        success, message = _rename_storage_key(storage_name, old_name, new_name, metadata_key)
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+
+    active_profiles = await _active_profiles()
+    await manager.broadcast({
+        "type": "profiles_updated",
+        "active_profiles": active_profiles
+    })
+    return {'success': True, 'active_profiles': active_profiles}
+
+@app.post("/profiles/delete")
+async def delete_profile(request: Request, user: str = Depends(require_auth)):
+    if not channel_instance:
+        raise HTTPException(status_code=500, detail="Channel not available")
+
+    await channel_instance._set_as_active_channel()
+    data = await request.json() or {}
+    profile_type = (data.get("type") or "").strip()
+    name = (data.get("name") or "").strip()
+
+    if profile_type in ("character", "char"):
+        module = _profile_module("characters")
+        storage_name = "characters"
+        metadata_key = "character"
+    elif profile_type in ("writing_style", "style"):
+        module = _profile_module("writing_style")
+        storage_name = "writing_styles"
+        metadata_key = "writing_style"
+    else:
+        raise HTTPException(status_code=400, detail="Unknown profile type")
+
+    deleted_name = None
+    if module and hasattr(module, "delete"):
+        canonical_name = _storage_find_key(storage_name, name) or name
+        result = await module.delete(name)
+        if result.get("status") != "success":
+            success, message = _delete_storage_key(storage_name, name, metadata_key)
+            if not success:
+                raise HTTPException(status_code=400, detail=result.get("content", message))
+            deleted_name = message
+        else:
+            deleted_name = canonical_name
+            _clear_profile_chat_metadata(metadata_key, canonical_name)
+    else:
+        success, message = _delete_storage_key(storage_name, name, metadata_key)
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        deleted_name = message
+
+    active_profiles = await _active_profiles()
+    await manager.broadcast({
+        "type": "profiles_updated",
+        "active_profiles": active_profiles
+    })
+    return {'success': True, 'deleted': deleted_name, 'active_profiles': active_profiles}
+
 @app.post("/api/search")
 async def search_chats(request: Request, user: str = Depends(require_auth)):
     if not channel_instance:
@@ -964,12 +1377,8 @@ async def search_chats(request: Request, user: str = Depends(require_auth)):
 
     all_chats = await channel_instance.context.chat.get_all()
 
-    # Filter by category if provided
     if category:
-        if category == 'general':
-            all_chats = [c for c in all_chats if not c.get('category') or c.get('category') == 'general']
-        else:
-            all_chats = [c for c in all_chats if c.get('category') == category]
+        all_chats = [c for c in all_chats if _chat_matches_category(c, category)]
 
     results = []
 
@@ -1189,6 +1598,46 @@ async def update_chat_category(request: Request, user: str = Depends(require_aut
                 pass
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/chat/update_metadata")
+async def update_chat_metadata(request: Request, user: str = Depends(require_auth)):
+    if not channel_instance:
+        raise HTTPException(status_code=500, detail="Channel not available")
+
+    data = await request.json() or {}
+    chat_id = data.get('chat_id')
+    metadata = data.get('metadata') or {}
+
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Chat ID is required")
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=400, detail="Metadata must be an object")
+
+    allowed_keys = {"character", "writing_style"}
+    all_chats = await channel_instance.context.chat.get_all()
+
+    for chat in all_chats:
+        if chat.get("id") != chat_id:
+            continue
+
+        custom_data = chat.get("custom_data", {}) or {}
+        for key, value in metadata.items():
+            if key not in allowed_keys:
+                continue
+            custom_data[key] = value or ""
+
+        if custom_data.get("character"):
+            custom_data["writing_style"] = ""
+        if custom_data.get("writing_style"):
+            custom_data["character"] = ""
+
+        chat["custom_data"] = custom_data
+        if chat.get("category", "general") in ("", "general", None):
+            chat["category"] = "general"
+        all_chats.save()
+        return {'success': True, 'custom_data': custom_data}
+
+    raise HTTPException(status_code=404, detail="Chat not found")
+
 @app.post("/chat/new")
 async def new_chat(request: Request, user: str = Depends(require_auth)):
     if not channel_instance:
@@ -1197,13 +1646,21 @@ async def new_chat(request: Request, user: str = Depends(require_auth)):
     await channel_instance._set_as_active_channel()
     data = await request.json() or {}
 
-    await channel_instance.context.chat.new(title=data.get('title'), category=data.get('category'), metadata=data.get('metadata'))
+    category = data.get('category') or 'general'
+    metadata = data.get('metadata') or {}
+
+    if metadata.get("character"):
+        metadata["writing_style"] = ""
+    if metadata.get("writing_style"):
+        metadata["character"] = ""
+
+    await channel_instance.context.chat.new(title=data.get('title') or '', category=category, metadata=metadata)
 
     return {
         'success': True, 'chat': {
             'id': await channel_instance.context.chat.get_id(),
-            'title': data.get('title', ''), 'category': data.get('category', ''),
-            'messages': [], 'metadata': data.get('metadata', {})
+            'title': data.get('title', ''), 'category': category,
+            'messages': [], 'metadata': metadata, 'custom_data': metadata
         }
     }
 
@@ -1228,7 +1685,10 @@ async def delete_chat(request: Request, user: str = Depends(require_auth)):
     if success is False:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    return {'success': True}
+    return {
+        'success': True,
+        'active_chat_id': await channel_instance.context.chat.get_id()
+    }
 
 @app.get("/chat/tags")
 async def get_all_tags(user: str = Depends(require_auth)):
@@ -1301,7 +1761,14 @@ async def save_settings(request: Request, user: str = Depends(require_auth)):
     if not result:
         raise HTTPException(status_code=500, detail="Something went wrong while saving settings!")
 
-    return {"success": True}
+    saved_style = await _save_writing_style_from_settings(form_data)
+    if saved_style:
+        await manager.broadcast({
+            "type": "profiles_updated",
+            "active_profiles": await _active_profiles()
+        })
+
+    return {"success": True, "saved_writing_style": saved_style}
 
 @app.get("/settings/get_module_info")
 async def get_module_info(user: str = Depends(require_auth)):
@@ -1651,20 +2118,20 @@ async def service_worker():
         sw_code = f.read()
     return Response(content=sw_code, media_type='application/javascript', headers={'Cache-Control': 'no-store'})
 
-@app.get('/icon-192.png')
+@app.get('/openlumara-icon-192.png')
 async def icon_192():
     """Serve the 192x192 icon for PWA."""
-    return FileResponse(os.path.join(WEBUI_DIR, "icon-192.png"))
+    return FileResponse(os.path.join(WEBUI_DIR, "openlumara-icon-192.png"))
 
-@app.get('/icon-512.png')
+@app.get('/openlumara-icon-512.png')
 async def icon_512():
     """Serve the 512x512 icon for PWA."""
-    return FileResponse(os.path.join(WEBUI_DIR, "icon-512.png"))
+    return FileResponse(os.path.join(WEBUI_DIR, "openlumara-icon-512.png"))
 
-@app.get('/favicon.ico')
+@app.get('/openlumara-favicon.ico')
 async def favicon():
     """Serve the favicon for the web interface."""
-    return FileResponse(os.path.join(WEBUI_DIR, "favicon.ico"))
+    return FileResponse(os.path.join(WEBUI_DIR, "openlumara-favicon.ico"))
 
 # =============================================================================
 # Channel Class

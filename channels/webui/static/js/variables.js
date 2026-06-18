@@ -32,6 +32,7 @@ let originalMessageContents = new Map();
 // Sidebar states
 let desktopSidebarHidden = false;
 let allChats = [];
+let allProfiles = { characters: [], writing_styles: [] };
 let searchInContent = false;
 let activeTagFilter = null;
 let tagFilterCollapsed = true;
