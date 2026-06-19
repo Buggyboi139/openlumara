@@ -33,6 +33,7 @@ let originalMessageContents = new Map();
 let desktopSidebarHidden = false;
 let allChats = [];
 let allProfiles = { characters: [], writing_styles: [] };
+let allProfileSettings = { writing_styles: {} };
 let searchInContent = false;
 let activeTagFilter = null;
 let tagFilterCollapsed = true;

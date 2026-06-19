@@ -757,6 +757,7 @@ async def get_messages(user: str = Depends(require_auth)):
     messages = copy.deepcopy(messages_orig)
 
     current_id = await channel_instance.context.chat.get_id()
+    custom_data = await channel_instance.context.chat.get_data()
 
     messages = _decorate_messages_for_webui(messages, custom_data)
 
@@ -773,6 +774,7 @@ async def get_messages_since(index: int = 0, user: str = Depends(require_auth)):
     current_id = await channel_instance.context.chat.get_id()
     current_title = await channel_instance.context.chat.get_title()
     current_tags = await channel_instance.context.chat.get_tags() or []
+    custom_data = await channel_instance.context.chat.get_data()
 
     messages = _decorate_messages_for_webui(messages, custom_data)
 
@@ -1103,6 +1105,45 @@ def _delete_storage_key(name: str, target_name: str, metadata_key: str):
     _clear_profile_chat_metadata(metadata_key, storage_key)
     return True, storage_key
 
+def _writing_style_defaults():
+    module = _profile_module("writing_style")
+    if not module or not hasattr(module, "settings"):
+        return {}
+
+    return {
+        key: setting.get("default")
+        for key, setting in module.settings.items()
+        if key != WRITING_STYLE_PROFILE_NAME_KEY
+    }
+
+def _valid_writing_style_settings(style_config: dict):
+    if not isinstance(style_config, dict):
+        return {}
+
+    module = _profile_module("writing_style")
+    valid_keys = set(_writing_style_defaults().keys())
+    if not valid_keys:
+        return {}
+
+    style_settings = {}
+
+    for key, value in style_config.items():
+        if key == WRITING_STYLE_PROFILE_NAME_KEY:
+            continue
+        if key not in valid_keys:
+            continue
+
+        if module and hasattr(module, "settings"):
+            setting = module.settings.get(key)
+            if not setting:
+                continue
+            if value == setting.get("default"):
+                continue
+
+        style_settings[key] = value
+
+    return style_settings
+
 async def _save_writing_style_from_settings(settings_data: dict):
     try:
         style_config = (
@@ -1117,21 +1158,7 @@ async def _save_writing_style_from_settings(settings_data: dict):
         if not style_name:
             return None
 
-        module = _profile_module("writing_style")
-        style_settings = {}
-        for key, value in style_config.items():
-            if key == WRITING_STYLE_PROFILE_NAME_KEY:
-                continue
-
-            if module and hasattr(module, "settings"):
-                setting = module.settings.get(key)
-                if not setting:
-                    continue
-                if value == setting.get("default"):
-                    continue
-
-            style_settings[key] = value
-
+        style_settings = _valid_writing_style_settings(style_config)
         storage = core.storage.StorageDict("writing_styles", "json")
         target_key = _storage_find_key("writing_styles", style_name)
         save_key = target_key or style_name
@@ -1147,6 +1174,34 @@ async def _save_writing_style_from_settings(settings_data: dict):
         if channel_instance:
             channel_instance.log("webui", f"Failed to save writing style preset: {core.detail_error(e)}")
         raise
+
+async def _active_writing_style_name():
+    custom_data = await channel_instance.context.chat.get_data() or {}
+    active_style = (custom_data.get("writing_style") or "").strip()
+    if not active_style:
+        return None
+    return _storage_find_key("writing_styles", active_style)
+
+def _writing_style_settings_for_name(name: str):
+    style_name = _storage_find_key("writing_styles", name)
+    if not style_name:
+        return None, None
+
+    storage = core.storage.StorageDict("writing_styles", "json")
+    saved_settings = storage.get(style_name, {}) or {}
+    settings = _writing_style_defaults()
+    settings.update({
+        key: value
+        for key, value in saved_settings.items()
+        if key in settings
+    })
+    settings[WRITING_STYLE_PROFILE_NAME_KEY] = style_name
+
+    return style_name, settings
+
+async def _active_writing_style_settings():
+    style_name = await _active_writing_style_name()
+    return _writing_style_settings_for_name(style_name)
 
 async def _rename_active_profile_metadata(metadata_key: str, old_value: str, new_value: str):
     chats = await channel_instance.context.chat.get_all()
@@ -1218,8 +1273,19 @@ async def list_writing_style_profiles(user: str = Depends(require_auth)):
     if module and hasattr(module, "styles"):
         profiles = sorted(set(profiles) | set(module.styles.keys()))
 
+    settings_by_profile = {}
+    for profile_name in profiles:
+        style_name, style_settings = _writing_style_settings_for_name(profile_name)
+        if style_name and style_settings:
+            settings_by_profile[style_name] = style_settings
+
     active = (await _active_profiles()).get("writing_style", "")
-    return {'profiles': profiles, 'active': active, 'module_enabled': _module_enabled("writing_style")}
+    return {
+        'profiles': profiles,
+        'active': active,
+        'module_enabled': _module_enabled("writing_style"),
+        'settings': settings_by_profile
+    }
 
 @app.post("/profiles/activate")
 async def activate_profile(request: Request, user: str = Depends(require_auth)):
@@ -1270,11 +1336,24 @@ async def activate_profile(request: Request, user: str = Depends(require_auth)):
         raise HTTPException(status_code=400, detail="Unknown profile type")
 
     active_profiles = await _active_profiles()
+    active_style_settings = None
+    if active_profiles.get("writing_style"):
+        style_name, style_settings = await _active_writing_style_settings()
+        if style_name and style_settings:
+            active_style_settings = {
+                "name": style_name,
+                "settings": style_settings
+            }
+
     await manager.broadcast({
         "type": "profiles_updated",
         "active_profiles": active_profiles
     })
-    return {'success': True, 'active_profiles': active_profiles}
+    return {
+        'success': True,
+        'active_profiles': active_profiles,
+        'active_writing_style_settings': active_style_settings
+    }
 
 @app.post("/profiles/rename")
 async def rename_profile(request: Request, user: str = Depends(require_auth)):
@@ -1501,8 +1580,7 @@ async def load_chat(id: str, user: str = Depends(require_auth)):
     tags = await channel_instance.context.chat.get_tags() or []
     custom_data = await channel_instance.context.chat.get_data()
 
-    for i, msg in enumerate(messages):
-        msg['index'] = i
+    messages = _decorate_messages_for_webui(messages, custom_data)
 
     await manager.broadcast({"type": "chat_switched", "chat_id": loaded_id})
 
@@ -1531,8 +1609,7 @@ async def get_current_chat(user: str = Depends(require_auth)):
     category = await chat.get_category()
     custom_data = await chat.get_data()
 
-    for i, msg in enumerate(messages):
-        msg['index'] = i
+    messages = _decorate_messages_for_webui(messages, custom_data)
 
     return {
         'success': True, 'chat': {
@@ -1634,7 +1711,21 @@ async def update_chat_metadata(request: Request, user: str = Depends(require_aut
         if chat.get("category", "general") in ("", "general", None):
             chat["category"] = "general"
         all_chats.save()
-        return {'success': True, 'custom_data': custom_data}
+
+        active_style_settings = None
+        if chat_id == await channel_instance.context.chat.get_id() and custom_data.get("writing_style"):
+            style_name, style_settings = await _active_writing_style_settings()
+            if style_name and style_settings:
+                active_style_settings = {
+                    "name": style_name,
+                    "settings": style_settings
+                }
+
+        return {
+            'success': True,
+            'custom_data': custom_data,
+            'active_writing_style_settings': active_style_settings
+        }
 
     raise HTTPException(status_code=404, detail="Chat not found")
 
@@ -1655,13 +1746,22 @@ async def new_chat(request: Request, user: str = Depends(require_auth)):
         metadata["character"] = ""
 
     await channel_instance.context.chat.new(title=data.get('title') or '', category=category, metadata=metadata)
+    active_style_settings = None
+    if metadata.get("writing_style"):
+        style_name, style_settings = await _active_writing_style_settings()
+        if style_name and style_settings:
+            active_style_settings = {
+                "name": style_name,
+                "settings": style_settings
+            }
 
     return {
         'success': True, 'chat': {
             'id': await channel_instance.context.chat.get_id(),
             'title': data.get('title', ''), 'category': category,
             'messages': [], 'metadata': metadata, 'custom_data': metadata
-        }
+        },
+        'active_writing_style_settings': active_style_settings
     }
 
 @app.post("/chat/clear")
@@ -1751,6 +1851,58 @@ async def remove_chat_tag(request: Request, user: str = Depends(require_auth)):
 @app.get("/settings/load")
 async def load_settings(user: str = Depends(require_auth)):
     return core.config.config
+
+@app.post("/settings/active_writing_style")
+async def save_active_writing_style_settings(request: Request, user: str = Depends(require_auth)):
+    if not channel_instance:
+        raise HTTPException(status_code=500, detail="Channel not available")
+
+    await channel_instance._set_as_active_channel()
+    data = await request.json() or {}
+    style_config = data.get("settings", data)
+    if not isinstance(style_config, dict):
+        raise HTTPException(status_code=400, detail="Invalid writing style settings")
+
+    source_name = _storage_find_key("writing_styles", data.get("name") or "")
+    if not source_name:
+        source_name = await _active_writing_style_name()
+    if not source_name:
+        raise HTTPException(status_code=400, detail="Writing style not found")
+
+    requested_name = (style_config.get(WRITING_STYLE_PROFILE_NAME_KEY) or source_name).strip()
+    if not requested_name:
+        raise HTTPException(status_code=400, detail="Writing style name cannot be empty")
+
+    storage = core.storage.StorageDict("writing_styles", "json")
+    existing_name = _storage_find_key("writing_styles", requested_name)
+    if existing_name and existing_name != source_name:
+        raise HTTPException(status_code=409, detail="A writing style with that name already exists")
+
+    style_settings = _valid_writing_style_settings(style_config)
+    save_name = source_name
+    if requested_name != source_name:
+        storage[requested_name] = storage.pop(source_name, {})
+        storage.save()
+        await _rename_active_profile_metadata("writing_style", source_name, requested_name)
+        save_name = requested_name
+        storage = core.storage.StorageDict("writing_styles", "json")
+
+    storage[save_name] = style_settings
+    storage.save()
+    await channel_instance.context.chat.set_data("writing_style", save_name)
+    await channel_instance.context.chat.set_data("character", "")
+
+    active_profiles = await _active_profiles()
+    await manager.broadcast({
+        "type": "profiles_updated",
+        "active_profiles": active_profiles
+    })
+
+    settings = _writing_style_defaults()
+    settings.update(style_settings)
+    settings[WRITING_STYLE_PROFILE_NAME_KEY] = save_name
+
+    return {"success": True, "name": save_name, "settings": settings, "active_profiles": active_profiles}
 
 @app.post("/settings/save")
 async def save_settings(request: Request, user: str = Depends(require_auth)):

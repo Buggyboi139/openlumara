@@ -178,6 +178,14 @@ async function activateProfileCategory(categoryKey) {
             console.error('Failed to activate profile:', data.detail || response.statusText);
             return false;
         }
+
+        await response.json().catch(() => ({}));
+        if (payload.type === 'writing_style' && typeof preloadWritingStyleSettingsByName === 'function') {
+            preloadWritingStyleSettingsByName(payload.name);
+        } else if (payload.type !== 'writing_style' && typeof preloadWritingStyleSettingsFromProfile === 'function') {
+            preloadWritingStyleSettingsFromProfile(null);
+        }
+
         return true;
     } catch (e) {
         console.error('Error activating profile:', e);
@@ -614,6 +622,9 @@ async function loadChats() {
         allProfiles = {
             characters: charactersData.profiles || [],
             writing_styles: stylesData.profiles || []
+        };
+        allProfileSettings = {
+            writing_styles: stylesData.settings || {}
         };
         profileModuleStatus = {
             characters: charactersData.module_enabled !== false,
@@ -1066,6 +1077,19 @@ async function moveChatToCategory(chatId, newCategory) {
 
             const data = await response.json();
             if (data.success) {
+                if (
+                    chatId === currentChatId &&
+                    prefix === 'style' &&
+                    typeof preloadWritingStyleSettingsByName === 'function'
+                ) {
+                    preloadWritingStyleSettingsByName(id);
+                } else if (
+                    chatId === currentChatId &&
+                    prefix !== 'style' &&
+                    typeof preloadWritingStyleSettingsFromProfile === 'function'
+                ) {
+                    preloadWritingStyleSettingsFromProfile(null);
+                }
                 await loadChats();
             } else {
                 console.error('Failed to move chat:', data.error);
@@ -1130,6 +1154,12 @@ async function newChat(categoryOverride = null) {
         const data = await response.json();
 
         if (data.success && data.chat) {
+            if (prefix === 'style' && typeof preloadWritingStyleSettingsByName === 'function') {
+                preloadWritingStyleSettingsByName(id);
+            } else if (prefix !== 'style' && typeof preloadWritingStyleSettingsFromProfile === 'function') {
+                preloadWritingStyleSettingsFromProfile(null);
+            }
+
             activeCategory = targetCategory;
             await loadChats();
             // Force the sidebar to stay on the current active category 

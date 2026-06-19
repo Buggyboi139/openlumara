@@ -14,6 +14,8 @@ let activeChannel = null; // Tracks the selected channel for Desktop split view 
 let categories = {}; // Global reference to settings categories
 let modulesExpanded = { modules: false, user_modules: false, channels: false }; // Tracks expansion state per category
 let isMobile = window.innerWidth <= 768; // Tracks mobile viewport state
+let activeWritingStyleSettingsName = '';
+let globalWritingStyleSettingsSnapshot = null;
 
 let resizeTimeout;
 window.addEventListener('resize', () => {
@@ -511,6 +513,97 @@ function formatLabel(key) {
     .trim();
 }
 
+function ensureWritingStyleSettingsPath() {
+    settingsData.modules = settingsData.modules || {};
+    settingsData.modules.settings = settingsData.modules.settings || {};
+    settingsData.modules.settings.writing_style = settingsData.modules.settings.writing_style || {};
+}
+
+function clonePlainValue(value) {
+    if (value === undefined) return undefined;
+    return JSON.parse(JSON.stringify(value));
+}
+
+function getWritingStyleSettingsFrom(data) {
+    return data?.modules?.settings?.writing_style;
+}
+
+function setWritingStyleSettingsOn(data, writingStyleSettings) {
+    data.modules = data.modules || {};
+    data.modules.settings = data.modules.settings || {};
+    if (writingStyleSettings === undefined) {
+        delete data.modules.settings.writing_style;
+    } else {
+        data.modules.settings.writing_style = clonePlainValue(writingStyleSettings);
+    }
+}
+
+function getWritingStyleProfileSettings(styleName) {
+    if (!styleName) return null;
+    const settings = allProfileSettings?.writing_styles || {};
+    return settings[styleName] || null;
+}
+
+function preloadWritingStyleSettingsByName(styleName) {
+    const styleSettings = getWritingStyleProfileSettings(styleName);
+    preloadWritingStyleSettingsFromProfile(
+        styleSettings ? { name: styleName, settings: styleSettings } : null
+    );
+    return !!styleSettings;
+}
+
+function preloadWritingStyleSettingsFromProfile(profileSettings) {
+    ensureWritingStyleSettingsPath();
+
+    if (!profileSettings || !profileSettings.settings) {
+        activeWritingStyleSettingsName = '';
+        if (globalWritingStyleSettingsSnapshot !== null) {
+            setWritingStyleSettingsOn(settingsData, globalWritingStyleSettingsSnapshot);
+        }
+    } else {
+        settingsData.modules.settings.writing_style = clonePlainValue(profileSettings.settings);
+        activeWritingStyleSettingsName = profileSettings.name || profileSettings.settings.custom_name || '';
+    }
+
+    if (Object.keys(settingsOriginal).length > 0) {
+        settingsOriginal = JSON.parse(JSON.stringify(settingsData));
+    }
+
+    if (categories && Object.keys(categories).length > 0) {
+        categories = organizeSettingsIntoCategories(settingsData, moduleInfoCache);
+        if (activeSettingsCategory) {
+            renderSettingsForm(categories, activeSettingsCategory);
+        }
+        renderSettingsNav(categories);
+    }
+
+    settingsHasChanges = false;
+    updateUnsavedIndicator();
+}
+
+function isSavingActiveWritingStyleSettings(activeSettingsCategory) {
+    return (
+        !!activeWritingStyleSettingsName &&
+        activeSettingsCategory === 'modules' &&
+        activeModule === 'writing_style'
+    );
+}
+
+function buildSettingsSavePayload(savingActiveWritingStyle) {
+    if (savingActiveWritingStyle) {
+        return {
+            name: activeWritingStyleSettingsName,
+            settings: settingsData.modules?.settings?.writing_style || {}
+        };
+    }
+
+    const payload = clonePlainValue(settingsData);
+    if (activeWritingStyleSettingsName) {
+        setWritingStyleSettingsOn(payload, globalWritingStyleSettingsSnapshot);
+    }
+    return payload;
+}
+
 // Load settings from backend
 async function loadSettings() {
     const loading = document.getElementById('settings-loading');
@@ -539,6 +632,7 @@ async function loadSettings() {
         // 2. If successful, update the master cache and the original reference
         settingsData = newData;
         settingsOriginal = JSON.parse(JSON.stringify(settingsData));
+        globalWritingStyleSettingsSnapshot = clonePlainValue(getWritingStyleSettingsFrom(settingsData));
 
         // 3. Attempt to fetch module info (gracefully)
         try {
@@ -566,6 +660,16 @@ async function loadSettings() {
             // We have cache! We will proceed to render, but we've logged the error.
             console.warn('Proceeding with cached settings due to connection error.');
         }
+    }
+
+    if (globalWritingStyleSettingsSnapshot === null) {
+        globalWritingStyleSettingsSnapshot = clonePlainValue(getWritingStyleSettingsFrom(settingsData));
+    }
+
+    if (typeof activeCategory === 'string' && activeCategory.startsWith('style:')) {
+        preloadWritingStyleSettingsByName(activeCategory.slice('style:'.length));
+    } else {
+        preloadWritingStyleSettingsFromProfile(null);
     }
 
     // 6. Render whatever we have (either the fresh data or the cached data)
@@ -2204,6 +2308,7 @@ async function saveSettings() {
     const saveBtn = document.getElementById('settings-save-btn');
     const btnText = saveBtn.querySelector('.btn-text');
     const btnLoading = saveBtn.querySelector('.btn-loading');
+    const savingActiveWritingStyle = isSavingActiveWritingStyleSettings(activeSettingsCategory);
     
     const hasChannelOrModuleChanges = detectChannelOrModuleChanges();
     const hasApiOrModelChanges = detectApiOrModelChanges();
@@ -2213,23 +2318,44 @@ async function saveSettings() {
     btnLoading.style.display = 'flex';
 
     try {
-        const response = await fetch('/settings/save', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settingsData),
-                                     signal: AbortSignal.timeout(15000)
-        });
+        const response = await fetch(
+            savingActiveWritingStyle ? '/settings/active_writing_style' : '/settings/save',
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildSettingsSavePayload(savingActiveWritingStyle)),
+                signal: AbortSignal.timeout(15000)
+            }
+        );
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
-            throw new Error(error.message || `Server returned ${response.status}`);
+            throw new Error(error.detail || error.message || `Server returned ${response.status}`);
+        }
+
+        const result = await response.json().catch(() => ({}));
+        if (savingActiveWritingStyle && result.settings) {
+            const previousStyleName = activeWritingStyleSettingsName;
+            ensureWritingStyleSettingsPath();
+            settingsData.modules.settings.writing_style = result.settings;
+            activeWritingStyleSettingsName = result.name || result.settings.custom_name || activeWritingStyleSettingsName;
+            allProfileSettings.writing_styles = allProfileSettings.writing_styles || {};
+            if (previousStyleName && previousStyleName !== activeWritingStyleSettingsName) {
+                delete allProfileSettings.writing_styles[previousStyleName];
+            }
+            allProfileSettings.writing_styles[activeWritingStyleSettingsName] = clonePlainValue(result.settings);
+            if (typeof activeCategory === 'string' && activeWritingStyleSettingsName) {
+                activeCategory = `style:${activeWritingStyleSettingsName}`;
+            }
         }
 
         // Success: Update the original reference so "unsaved" indicator clears
         settingsOriginal = JSON.parse(JSON.stringify(settingsData));
         settingsHasChanges = false;
 
-        if (hasChannelOrModuleChanges) {
+        if (savingActiveWritingStyle) {
+            showSettingsSuccess();
+        } else if (hasChannelOrModuleChanges) {
             await restartServer();
         } else if (hasApiOrModelChanges) {
             await reconnectApi();
