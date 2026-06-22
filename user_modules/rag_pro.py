@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import re
 from datetime import datetime
@@ -191,7 +190,7 @@ class RagPro(core.module.Module):
         Intended for programmatic clients such as the ZAP Cockpit Lumara RAG bridge.
         """
         if not query or not query.strip():
-            return {"results": [], "issue": "A non-empty search query is required."}
+            return {"success": False, "results": [], "issue": "A non-empty search query is required."}
 
         safe_n_results = max(1, min(int(n_results or 5), 25))
         enriched_query = self._enrich_query(query, context or {})
@@ -200,7 +199,7 @@ class RagPro(core.module.Module):
             embedder = await asyncio.to_thread(self._get_embedder)
             query_embedding_array = await asyncio.to_thread(embedder.encode, enriched_query)
         except Exception as e:
-            return {"results": [], "issue": f"RAG search is unavailable: {e}"}
+            return {"success": False, "results": [], "issue": f"RAG search is unavailable: {e}"}
 
         query_embedding = query_embedding_array.tolist()
 
@@ -238,7 +237,7 @@ class RagPro(core.module.Module):
                 item["score"] = float(1.0 / (1.0 + max(float(distance), 0.0)))
             output.append(item)
 
-        return {"results": output, "query": enriched_query}
+        return {"success": True, "results": output, "query": enriched_query}
 
     async def search(self, query: str):
         """
@@ -269,14 +268,12 @@ class RagPro(core.module.Module):
         If you need to read more of the file, call this tool again and increase the page number.
 
         Args:
-            file_name: The exact name of the file (e.g., 'YT_Transcript_abc123.txt').
+            file_name: The exact name or relative knowledge path.
             page: The page number to read (starts at 1).
         """
-        clean_name = os.path.basename(file_name)
-        target_path = core.sandbox_path(self.knowledge_path, clean_name)
-
-        if not os.path.exists(target_path):
-            return f"Error: Could not find '{clean_name}' in the knowledge folder. Double check the file name."
+        target_path, display_name = self._resolve_knowledge_path(file_name)
+        if not target_path:
+            return f"Error: Could not find '{file_name}' in the knowledge folder. Double check the file name."
 
         def _read_paginated():
             try:
@@ -285,16 +282,13 @@ class RagPro(core.module.Module):
 
                 chars_per_page = 4000
                 total_length = len(content)
-                total_pages = (total_length // chars_per_page) + 1
-
+                total_pages = max(1, (total_length // chars_per_page) + 1)
                 safe_page = max(1, min(page, total_pages))
-
                 start_idx = (safe_page - 1) * chars_per_page
                 end_idx = start_idx + chars_per_page
-
                 page_text = content[start_idx:end_idx]
 
-                return (f"--- {clean_name} (Page {safe_page} of {total_pages}) ---\n\n"
+                return (f"--- {display_name} (Page {safe_page} of {total_pages}) ---\n\n"
                         f"{page_text}\n\n"
                         f"--- End of Page {safe_page} ---")
             except Exception as e:
@@ -334,6 +328,33 @@ class RagPro(core.module.Module):
             "path": os.path.relpath(target_path, self.knowledge_path).replace(os.sep, "/"),
             "ingest": ingest_result,
         }
+
+    def _resolve_knowledge_path(self, file_name: str):
+        if not file_name:
+            return None, ""
+
+        requested = str(file_name).replace("\\", "/").strip().lstrip("/")
+        knowledge_abs = os.path.abspath(self.knowledge_path)
+
+        candidates = []
+        if requested:
+            candidates.append(os.path.abspath(os.path.join(self.knowledge_path, requested)))
+        base_name = os.path.basename(requested)
+        if base_name:
+            candidates.append(os.path.abspath(os.path.join(self.knowledge_path, base_name)))
+
+        for candidate in candidates:
+            if candidate.startswith(knowledge_abs + os.sep) and os.path.exists(candidate):
+                return candidate, os.path.relpath(candidate, self.knowledge_path).replace(os.sep, "/")
+
+        if base_name:
+            for root, _, files in os.walk(self.knowledge_path):
+                if base_name in files:
+                    candidate = os.path.abspath(os.path.join(root, base_name))
+                    if candidate.startswith(knowledge_abs + os.sep):
+                        return candidate, os.path.relpath(candidate, self.knowledge_path).replace(os.sep, "/")
+
+        return None, requested
 
     def _enrich_query(self, query: str, context: dict):
         parts = [query]
