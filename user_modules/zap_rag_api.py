@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 from typing import Any
+from urllib.parse import parse_qs
 
 import core
 import uvicorn
@@ -133,12 +134,27 @@ class ZapRagApi(core.module.Module):
             await self._authorize(request)
             rag = self._rag_module()
             data = await self._json_body(request)
-            query = str(data.get("query") or "").strip()
+            query = str(
+                data.get("query")
+                or data.get("q")
+                or data.get("prompt")
+                or data.get("text")
+                or data.get("body")
+                or ""
+            ).strip()
             context = data.get("context") if isinstance(data.get("context"), dict) else {}
             n_results = self._result_count(data)
 
+            if not query and context:
+                query = self._query_from_context(context)
+
             if not query:
-                raise HTTPException(status_code=400, detail="query is required")
+                return {
+                    "success": False,
+                    "results": [],
+                    "issue": "query is required",
+                    "received_keys": sorted(str(k) for k in data.keys()),
+                }
 
             if hasattr(rag, "search_structured"):
                 return await rag.search_structured(query, context=context, n_results=n_results)
@@ -178,7 +194,7 @@ class ZapRagApi(core.module.Module):
             rag = self._rag_module()
             data = await self._json_body(request)
             title = str(data.get("title") or "ZAP Cockpit Note")
-            body = str(data.get("body") or "")
+            body = str(data.get("body") or data.get("note") or "")
             tags = data.get("tags") if isinstance(data.get("tags"), list) else ["zap-cockpit"]
             if not body.strip():
                 raise HTTPException(status_code=400, detail="body is required")
@@ -213,13 +229,50 @@ class ZapRagApi(core.module.Module):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def _json_body(self, request: Request):
+        raw = await request.body()
+        query_params = dict(request.query_params)
+        if not raw:
+            return query_params
+
+        content_type = request.headers.get("content-type", "").lower()
+        if "application/x-www-form-urlencoded" in content_type:
+            parsed = parse_qs(raw.decode("utf-8", errors="ignore"), keep_blank_values=True)
+            data = {key: values[-1] if values else "" for key, values in parsed.items()}
+            data.update(query_params)
+            return data
+
         try:
             data = await request.json()
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=400, detail="JSON body must be an object")
-        return data
+            text = raw.decode("utf-8", errors="ignore").strip()
+            if text:
+                data = {"query": text}
+                data.update(query_params)
+                return data
+            return query_params
+
+        if isinstance(data, dict):
+            data.update(query_params)
+            return data
+
+        if isinstance(data, str) and data.strip():
+            data = {"query": data.strip()}
+            data.update(query_params)
+            return data
+
+        return query_params
+
+    def _query_from_context(self, context: dict):
+        parts = []
+        for key in ("method", "path", "target_uri"):
+            value = context.get(key)
+            if value:
+                parts.append(str(value))
+        for key in ("headers", "query_params", "body_params", "cookie_names", "signals"):
+            values = context.get(key)
+            if isinstance(values, list):
+                parts.extend(str(value) for value in values if str(value).strip())
+        return " ".join(parts).strip()
 
     def _rag_module(self, required=True):
         rag = self.manager.modules.get("rag_pro")
