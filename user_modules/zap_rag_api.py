@@ -213,13 +213,25 @@ class ZapRagApi(core.module.Module):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def _json_body(self, request: Request):
-        try:
-            data = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        if not isinstance(data, dict):
+            raw = await request.body()
+            if not raw:
+                return {}
+
+            try:
+                data = await request.json()
+            except Exception:
+                text = raw.decode("utf-8", errors="ignore").strip()
+                if text:
+                    return {"query": text}
+                raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+            if isinstance(data, dict):
+                return data
+
+            if isinstance(data, str) and data.strip():
+                return {"query": data.strip()}
+
             raise HTTPException(status_code=400, detail="JSON body must be an object")
-        return data
 
     def _rag_module(self, required=True):
         rag = self.manager.modules.get("rag_pro")
