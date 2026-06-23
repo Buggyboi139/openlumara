@@ -58,7 +58,7 @@ class RagPro(core.module.Module):
             "default": True,
         },
     }
-    dependencies = ["chromadb", "sentence-transformers", "langchain-text-splitters"]
+    dependencies = ["requests", "chromadb", "sentence-transformers", "langchain-text-splitters"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
