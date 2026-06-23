@@ -1,7 +1,7 @@
 import asyncio
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 import chromadb
 import core
@@ -11,9 +11,17 @@ from sentence_transformers import SentenceTransformer
 
 class RagPro(core.module.Module):
     """
-    The Pro RAG Module!
+    The Pro RAG Module.
     Indexes docs from data/knowledge and allows AI retrieval and deep reading.
     """
+
+    SUPPORTED_EXTS = (".md", ".txt", ".json", ".har", ".yaml", ".yml")
+    DEFAULT_CHUNK_SIZE = 2000
+    DEFAULT_CHUNK_OVERLAP = 200
+    DEFAULT_MAX_FILE_SIZE_MB = 15
+    DEFAULT_SEARCH_RESULTS = 5
+    DEFAULT_MAX_SEARCH_RESULTS = 25
+    MAX_ENRICHED_QUERY_CHARS = 12000
 
     settings = {
         "knowledge_folder": {
@@ -34,11 +42,23 @@ class RagPro(core.module.Module):
         },
         "chunk_size": {
             "description": "Character chunk size for knowledge ingestion.",
-            "default": 2000
+            "default": DEFAULT_CHUNK_SIZE
         },
         "chunk_overlap": {
             "description": "Character overlap between chunks during ingestion.",
-            "default": 200
+            "default": DEFAULT_CHUNK_OVERLAP
+        },
+        "max_file_size_mb": {
+            "description": "Maximum single knowledge file size to ingest. Large HARs and dumps can be split manually.",
+            "default": DEFAULT_MAX_FILE_SIZE_MB
+        },
+        "max_search_results": {
+            "description": "Maximum structured search results returned to API clients.",
+            "default": DEFAULT_MAX_SEARCH_RESULTS
+        },
+        "save_note_auto_ingest": {
+            "description": "Automatically ingest ZAP notes immediately after saving them.",
+            "default": True
         }
     }
     dependencies = ["chromadb", "sentence-transformers", "langchain-text-splitters"]
@@ -46,20 +66,20 @@ class RagPro(core.module.Module):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        folder_name = self.config.get("knowledge_folder")
-        self.knowledge_path = core.get_data_path(folder_name)
+        folder_name = self.config.get("knowledge_folder") or "knowledge"
+        self.knowledge_path = os.path.abspath(core.get_data_path(folder_name))
         db_path = core.get_data_path("rag_db")
 
-        if not os.path.exists(self.knowledge_path):
-            os.makedirs(self.knowledge_path)
+        os.makedirs(self.knowledge_path, exist_ok=True)
 
         self.client = chromadb.PersistentClient(path=db_path)
         self.collection = self.client.get_or_create_collection("knowledge_base")
         self.embedder = None
         self.embedder_error = None
+        self._ingest_lock = asyncio.Lock()
 
     async def on_ready(self):
-        if self.config.get("auto_ingest_on_ready", default=False):
+        if self._as_bool(self.config.get("auto_ingest_on_ready", default=False)):
             asyncio.create_task(self._safe_ingest())
 
     def _get_embedder(self):
@@ -69,7 +89,7 @@ class RagPro(core.module.Module):
             raise RuntimeError(self.embedder_error)
 
         model_name = self.config.get("embedding_model") or "all-MiniLM-L6-v2"
-        local_files_only = bool(self.config.get("local_files_only", default=True))
+        local_files_only = self._as_bool(self.config.get("local_files_only", default=True))
         try:
             self.embedder = SentenceTransformer(model_name, local_files_only=local_files_only)
             return self.embedder
@@ -79,70 +99,142 @@ class RagPro(core.module.Module):
 
     async def _safe_ingest(self):
         try:
-            await self.ingest_folder(self.knowledge_path)
-            return True
+            result = await self.ingest_folder(self.knowledge_path)
+            return bool(result.get("success", False))
         except Exception as e:
             self.log("rag_pro", f"RAG ingestion failed: {e}")
             return False
 
-    async def ingest_folder(self, folder_path):
-        embedder = await asyncio.to_thread(self._get_embedder)
-        chunk_size = int(self.config.get("chunk_size", default=2000) or 2000)
-        chunk_overlap = int(self.config.get("chunk_overlap", default=200) or 200)
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap
-        )
+    async def ingest_folder(self, folder_path=None):
+        """
+        Ingest supported knowledge files. Returns structured status for API callers.
+        One bad file is reported, not allowed to kill the whole ingest because apparently resilience matters.
+        """
+        folder_path = os.path.abspath(folder_path or self.knowledge_path)
+        if not self._is_inside_knowledge(folder_path, allow_root=True):
+            return {
+                "success": False,
+                "indexed_files": 0,
+                "indexed_chunks": 0,
+                "skipped_files": [],
+                "errors": [f"Refusing to ingest outside knowledge folder: {folder_path}"],
+            }
+        if not os.path.isdir(folder_path):
+            return {
+                "success": False,
+                "indexed_files": 0,
+                "indexed_chunks": 0,
+                "skipped_files": [],
+                "errors": [f"Knowledge folder does not exist: {folder_path}"],
+            }
 
-        supported_exts = (".md", ".txt", ".json", ".har", ".yaml", ".yml")
-        indexed_files = 0
-        indexed_chunks = 0
+        async with self._ingest_lock:
+            try:
+                embedder = await asyncio.to_thread(self._get_embedder)
+            except Exception as e:
+                return {
+                    "success": False,
+                    "indexed_files": 0,
+                    "indexed_chunks": 0,
+                    "skipped_files": [],
+                    "errors": [str(e)],
+                }
 
-        for root, _, files in os.walk(folder_path):
-            for file in files:
-                if not file.lower().endswith(supported_exts):
-                    continue
+            chunk_size = self._safe_int(
+                self.config.get("chunk_size", default=self.DEFAULT_CHUNK_SIZE),
+                self.DEFAULT_CHUNK_SIZE,
+                min_value=250,
+                max_value=20000,
+            )
+            chunk_overlap = self._safe_int(
+                self.config.get("chunk_overlap", default=self.DEFAULT_CHUNK_OVERLAP),
+                self.DEFAULT_CHUNK_OVERLAP,
+                min_value=0,
+                max_value=max(0, chunk_size - 1),
+            )
+            max_file_size = self._safe_int(
+                self.config.get("max_file_size_mb", default=self.DEFAULT_MAX_FILE_SIZE_MB),
+                self.DEFAULT_MAX_FILE_SIZE_MB,
+                min_value=1,
+                max_value=1024,
+            ) * 1024 * 1024
 
-                path = os.path.join(root, file)
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
 
-                def read_file():
-                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                        return f.read()
+            indexed_files = 0
+            indexed_chunks = 0
+            skipped_files = []
+            errors = []
+            seen_sources = set()
 
-                text = await asyncio.to_thread(read_file)
-                chunks = splitter.split_text(text)
+            for root, _, files in os.walk(folder_path):
+                for file_name in files:
+                    if not self._supported_file(file_name):
+                        continue
 
-                if not chunks:
-                    continue
+                    path = os.path.abspath(os.path.join(root, file_name))
+                    source = self._source_for_path(path)
+                    seen_sources.add(source)
 
-                embeddings = await asyncio.to_thread(embedder.encode, chunks)
-                embeddings_list = embeddings.tolist()
-                rel_path = os.path.relpath(path, self.knowledge_path)
-                source = rel_path.replace(os.sep, "/")
-                stat = await asyncio.to_thread(os.stat, path)
+                    try:
+                        stat = await asyncio.to_thread(os.stat, path)
+                        if stat.st_size > max_file_size:
+                            skipped_files.append({
+                                "source": source,
+                                "reason": f"file exceeds max_file_size_mb ({stat.st_size} bytes)",
+                            })
+                            continue
 
-                ids = [f"{source}_{i}" for i in range(len(chunks))]
-                metadatas = [
-                    {
-                        "source": source,
-                        "full_path": path,
-                        "mtime": stat.st_mtime,
-                        "size": stat.st_size,
-                    }
-                    for _ in chunks
-                ]
+                        text = await asyncio.to_thread(self._read_file, path)
+                        chunks = splitter.split_text(text)
+                        await self._delete_source(source)
 
-                await asyncio.to_thread(
-                    self.collection.upsert,
-                    ids=ids,
-                    embeddings=embeddings_list,
-                    documents=chunks,
-                    metadatas=metadatas
-                )
-                indexed_files += 1
-                indexed_chunks += len(chunks)
+                        if not chunks:
+                            skipped_files.append({"source": source, "reason": "empty or no chunks"})
+                            continue
 
-        return {"indexed_files": indexed_files, "indexed_chunks": indexed_chunks}
+                        embeddings = await asyncio.to_thread(embedder.encode, chunks)
+                        embeddings_list = embeddings.tolist()
+
+                        ids = [f"{source}_{i}" for i in range(len(chunks))]
+                        metadatas = [
+                            {
+                                "source": source,
+                                "full_path": path,
+                                "mtime": stat.st_mtime,
+                                "size": stat.st_size,
+                            }
+                            for _ in chunks
+                        ]
+
+                        await asyncio.to_thread(
+                            self.collection.upsert,
+                            ids=ids,
+                            embeddings=embeddings_list,
+                            documents=chunks,
+                            metadatas=metadatas,
+                        )
+                        indexed_files += 1
+                        indexed_chunks += len(chunks)
+                    except Exception as e:
+                        errors.append({"source": source, "error": str(e)})
+
+            if os.path.abspath(folder_path) == self.knowledge_path:
+                deleted_stale = await self._delete_missing_sources()
+            else:
+                deleted_stale = 0
+
+            return {
+                "success": not errors,
+                "indexed_files": indexed_files,
+                "indexed_chunks": indexed_chunks,
+                "skipped_files": skipped_files,
+                "errors": errors,
+                "deleted_stale_sources": deleted_stale,
+            }
 
     async def list_knowledge_files_structured(self):
         def _get_files():
@@ -151,10 +243,10 @@ class RagPro(core.module.Module):
                 return files
             for root, _, names in os.walk(self.knowledge_path):
                 for name in names:
-                    path = os.path.join(root, name)
+                    path = os.path.abspath(os.path.join(root, name))
                     if not os.path.isfile(path):
                         continue
-                    rel_path = os.path.relpath(path, self.knowledge_path).replace(os.sep, "/")
+                    rel_path = self._source_for_path(path)
                     stat = os.stat(path)
                     files.append({
                         "name": name,
@@ -184,7 +276,7 @@ class RagPro(core.module.Module):
         except Exception as e:
             return f"Error listing directory: {e}"
 
-    async def search_structured(self, query: str, context: dict | None = None, n_results: int = 5):
+    async def search_structured(self, query: str, context: dict | None = None, n_results: int = None):
         """
         Search the local knowledge base and return structured JSON-friendly results.
         Intended for programmatic clients such as the ZAP Cockpit Lumara RAG bridge.
@@ -192,7 +284,14 @@ class RagPro(core.module.Module):
         if not query or not query.strip():
             return {"success": False, "results": [], "issue": "A non-empty search query is required."}
 
-        safe_n_results = max(1, min(int(n_results or 5), 25))
+        max_results = self._safe_int(
+            self.config.get("max_search_results", default=self.DEFAULT_MAX_SEARCH_RESULTS),
+            self.DEFAULT_MAX_SEARCH_RESULTS,
+            min_value=1,
+            max_value=100,
+        )
+        requested_results = n_results if n_results is not None else self.DEFAULT_SEARCH_RESULTS
+        safe_n_results = self._safe_int(requested_results, self.DEFAULT_SEARCH_RESULTS, min_value=1, max_value=max_results)
         enriched_query = self._enrich_query(query, context or {})
 
         try:
@@ -208,14 +307,16 @@ class RagPro(core.module.Module):
                 self.collection.query,
                 query_embeddings=[query_embedding],
                 n_results=safe_n_results,
-                include=["documents", "metadatas", "distances"]
+                include=["documents", "metadatas", "distances"],
             )
         except TypeError:
             results = await asyncio.to_thread(
                 self.collection.query,
                 query_embeddings=[query_embedding],
-                n_results=safe_n_results
+                n_results=safe_n_results,
             )
+        except Exception as e:
+            return {"success": False, "results": [], "issue": f"RAG query failed: {e}"}
 
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
@@ -264,7 +365,7 @@ class RagPro(core.module.Module):
     async def read_document(self, file_name: str, page: int = 1):
         """
         Reads a full document from the local knowledge base.
-        Because files can be massive, it returns the text in "Pages".
+        Because files can be massive, it returns the text in Pages.
         If you need to read more of the file, call this tool again and increase the page number.
 
         Args:
@@ -275,6 +376,8 @@ class RagPro(core.module.Module):
         if not target_path:
             return f"Error: Could not find '{file_name}' in the knowledge folder. Double check the file name."
 
+        safe_page = self._safe_int(page, 1, min_value=1, max_value=1000000)
+
         def _read_paginated():
             try:
                 with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -283,14 +386,14 @@ class RagPro(core.module.Module):
                 chars_per_page = 4000
                 total_length = len(content)
                 total_pages = max(1, (total_length // chars_per_page) + 1)
-                safe_page = max(1, min(page, total_pages))
-                start_idx = (safe_page - 1) * chars_per_page
+                selected_page = max(1, min(safe_page, total_pages))
+                start_idx = (selected_page - 1) * chars_per_page
                 end_idx = start_idx + chars_per_page
                 page_text = content[start_idx:end_idx]
 
-                return (f"--- {display_name} (Page {safe_page} of {total_pages}) ---\n\n"
+                return (f"--- {display_name} (Page {selected_page} of {total_pages}) ---\n\n"
                         f"{page_text}\n\n"
-                        f"--- End of Page {safe_page} ---")
+                        f"--- End of Page {selected_page} ---")
             except Exception as e:
                 return f"Error reading file: {e}"
 
@@ -301,18 +404,21 @@ class RagPro(core.module.Module):
         Save a markdown note into data/knowledge/zap-notes and ingest it.
         This is used by the ZAP Cockpit Lumara RAG bridge.
         """
+        if not body or not str(body).strip():
+            return {"success": False, "issue": "Note body is required."}
+
         safe_title = self._safe_filename(title or "ZAP Cockpit Note")
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        folder = os.path.join(self.knowledge_path, "zap-notes")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        folder = os.path.abspath(os.path.join(self.knowledge_path, "zap-notes"))
         os.makedirs(folder, exist_ok=True)
         filename = f"{timestamp}_{safe_title}.md"
         target_path = os.path.abspath(os.path.join(folder, filename))
-        folder_abs = os.path.abspath(folder)
-        if not target_path.startswith(folder_abs + os.sep):
-            raise ValueError("Invalid note filename.")
+        if not self._is_inside_knowledge(target_path):
+            return {"success": False, "issue": "Invalid note filename."}
 
-        tag_line = ", ".join(str(tag) for tag in (tags or []) if str(tag).strip())
-        content = body or ""
+        safe_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+        tag_line = ", ".join(safe_tags)
+        content = str(body)
         if tag_line and "## Tags" not in content:
             content = f"{content.rstrip()}\n\n## Tags\n\n{tag_line}\n"
 
@@ -321,21 +427,21 @@ class RagPro(core.module.Module):
                 f.write(content)
 
         await asyncio.to_thread(_write_note)
-        ingest_result = await self.ingest_folder(folder)
-        return {
+        result = {
+            "success": True,
             "saved": True,
             "file": filename,
-            "path": os.path.relpath(target_path, self.knowledge_path).replace(os.sep, "/"),
-            "ingest": ingest_result,
+            "path": self._source_for_path(target_path),
         }
+        if self._as_bool(self.config.get("save_note_auto_ingest", default=True)):
+            result["ingest"] = await self.ingest_folder(folder)
+        return result
 
     def _resolve_knowledge_path(self, file_name: str):
         if not file_name:
             return None, ""
 
         requested = str(file_name).replace("\\", "/").strip().lstrip("/")
-        knowledge_abs = os.path.abspath(self.knowledge_path)
-
         candidates = []
         if requested:
             candidates.append(os.path.abspath(os.path.join(self.knowledge_path, requested)))
@@ -344,34 +450,61 @@ class RagPro(core.module.Module):
             candidates.append(os.path.abspath(os.path.join(self.knowledge_path, base_name)))
 
         for candidate in candidates:
-            if candidate.startswith(knowledge_abs + os.sep) and os.path.exists(candidate):
-                return candidate, os.path.relpath(candidate, self.knowledge_path).replace(os.sep, "/")
+            if self._is_inside_knowledge(candidate) and os.path.exists(candidate):
+                return candidate, self._source_for_path(candidate)
 
         if base_name:
             for root, _, files in os.walk(self.knowledge_path):
                 if base_name in files:
                     candidate = os.path.abspath(os.path.join(root, base_name))
-                    if candidate.startswith(knowledge_abs + os.sep):
-                        return candidate, os.path.relpath(candidate, self.knowledge_path).replace(os.sep, "/")
+                    if self._is_inside_knowledge(candidate):
+                        return candidate, self._source_for_path(candidate)
 
         return None, requested
 
+    async def _delete_source(self, source: str):
+        try:
+            await asyncio.to_thread(self.collection.delete, where={"source": source})
+            return True
+        except Exception:
+            return False
+
+    async def _delete_missing_sources(self):
+        try:
+            data = await asyncio.to_thread(self.collection.get, include=["metadatas"])
+        except Exception:
+            return 0
+
+        sources = set()
+        for meta in data.get("metadatas") or []:
+            if meta and meta.get("source"):
+                sources.add(meta["source"])
+
+        deleted = 0
+        for source in sources:
+            candidate = os.path.abspath(os.path.join(self.knowledge_path, source))
+            if self._is_inside_knowledge(candidate) and not os.path.exists(candidate):
+                if await self._delete_source(source):
+                    deleted += 1
+        return deleted
+
     def _enrich_query(self, query: str, context: dict):
-        parts = [query]
-        if not isinstance(context, dict):
-            return query
+        parts = [str(query)]
+        if isinstance(context, dict):
+            for key in ("method", "path", "target_uri"):
+                value = context.get(key)
+                if value:
+                    parts.append(str(value))
 
-        for key in ("method", "path", "target_uri"):
-            value = context.get(key)
-            if value:
-                parts.append(str(value))
+            for key in ("headers", "query_params", "body_params", "cookie_names", "signals"):
+                values = context.get(key)
+                if isinstance(values, list):
+                    parts.extend(str(value) for value in values if str(value).strip())
 
-        for key in ("headers", "query_params", "body_params", "cookie_names", "signals"):
-            values = context.get(key)
-            if isinstance(values, list):
-                parts.extend(str(value) for value in values if str(value).strip())
-
-        return " ".join(parts)
+        enriched = " ".join(parts)
+        if len(enriched) > self.MAX_ENRICHED_QUERY_CHARS:
+            return enriched[:self.MAX_ENRICHED_QUERY_CHARS]
+        return enriched
 
     def _tags_for_result(self, meta: dict, doc: str):
         haystack = f"{meta.get('source', '')} {doc}".lower()
@@ -392,9 +525,45 @@ class RagPro(core.module.Module):
         return tags
 
     def _safe_filename(self, value: str):
-        cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", value).strip().replace(" ", "_")
+        cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value)).strip().replace(" ", "_")
         cleaned = cleaned[:80].strip("._-")
         return cleaned or "zap_cockpit_note"
+
+    def _supported_file(self, file_name: str):
+        return file_name.lower().endswith(self.SUPPORTED_EXTS)
+
+    def _read_file(self, path: str):
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+
+    def _source_for_path(self, path: str):
+        return os.path.relpath(os.path.abspath(path), self.knowledge_path).replace(os.sep, "/")
+
+    def _is_inside_knowledge(self, path: str, allow_root=False):
+        path_abs = os.path.abspath(path)
+        if allow_root and path_abs == self.knowledge_path:
+            return True
+        return path_abs.startswith(self.knowledge_path + os.sep)
+
+    @staticmethod
+    def _safe_int(value, default, min_value=None, max_value=None):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = default
+        if min_value is not None:
+            parsed = max(min_value, parsed)
+        if max_value is not None:
+            parsed = min(max_value, parsed)
+        return parsed
+
+    @staticmethod
+    def _as_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
 
     @core.module.command("rag_search")
     async def rag_search_cmd(self, args: list):
