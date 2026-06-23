@@ -168,7 +168,6 @@ class RagPro(core.module.Module):
             indexed_chunks = 0
             skipped_files = []
             errors = []
-            seen_sources = set()
 
             for root, _, files in os.walk(folder_path):
                 for file_name in files:
@@ -177,7 +176,6 @@ class RagPro(core.module.Module):
 
                     path = os.path.abspath(os.path.join(root, file_name))
                     source = self._source_for_path(path)
-                    seen_sources.add(source)
 
                     try:
                         stat = await asyncio.to_thread(os.stat, path)
@@ -434,7 +432,11 @@ class RagPro(core.module.Module):
             "path": self._source_for_path(target_path),
         }
         if self._as_bool(self.config.get("save_note_auto_ingest", default=True)):
-            result["ingest"] = await self.ingest_folder(folder)
+            ingest_result = await self.ingest_folder(folder)
+            result["ingest"] = ingest_result
+            if not ingest_result.get("success", False):
+                result["success"] = False
+                result["issue"] = "Note was saved, but automatic ingest failed."
         return result
 
     def _resolve_knowledge_path(self, file_name: str):
@@ -551,38 +553,3 @@ class RagPro(core.module.Module):
             parsed = int(value)
         except Exception:
             parsed = default
-        if min_value is not None:
-            parsed = max(min_value, parsed)
-        if max_value is not None:
-            parsed = min(max_value, parsed)
-        return parsed
-
-    @staticmethod
-    def _as_bool(value):
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-        return bool(value)
-
-    @core.module.command("rag_search")
-    async def rag_search_cmd(self, args: list):
-        """
-        Search yer knowledge base manually!
-        Usage: /rag_search <query>
-        """
-        query = " ".join(args)
-        if not query:
-            return "What be ye lookin' for, matey?"
-
-        return await self.search(query)
-
-    @core.module.command("rag_ingest")
-    async def rag_ingest_cmd(self, args: list):
-        """
-        Forces the bot to re-read the knowledge folder and update the database.
-        Usage: /rag_ingest
-        """
-        if await self._safe_ingest():
-            return "Aye aye! I just finished updating the knowledge database with any new scrolls ye added!"
-        return "RAG ingest failed. Check the logs for the embedding model error."
