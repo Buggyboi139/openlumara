@@ -1,9 +1,11 @@
 import asyncio
+import ipaddress
 from typing import Any
 
 import core
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 
 class ZapRagApi(core.module.Module):
@@ -30,6 +32,10 @@ class ZapRagApi(core.module.Module):
             "description": "Require the api_key even when bound to localhost.",
             "default": False
         },
+        "allow_no_auth_remote": {
+            "description": "Allow unauthenticated requests from non-loopback clients. Leave false unless isolated by other controls.",
+            "default": False
+        },
         "default_results": {
             "description": "Default number of RAG results returned to ZAP Cockpit.",
             "default": 6
@@ -43,16 +49,28 @@ class ZapRagApi(core.module.Module):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.host = self.config.get("host") or "127.0.0.1"
-        self.port = int(self.config.get("port", default=5000) or 5000)
+        self.host = str(self.config.get("host") or "127.0.0.1")
+        self.port = self._safe_int(self.config.get("port", default=5000), 5000, 1, 65535)
         self.server = None
         self.app = FastAPI(docs_url=None, redoc_url=None)
+        self._setup_exception_handlers()
         self._setup_routes()
 
     async def on_background(self):
-        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="error")
+        config = uvicorn.Config(
+            self.app,
+            host=self.host,
+            port=self.port,
+            log_level="error",
+            access_log=False,
+        )
         self.server = uvicorn.Server(config)
         self.log("zap_rag_api", f"Starting ZAP RAG API on http://{self.host}:{self.port}")
+        if self._remote_bind_without_auth():
+            self.log(
+                "zap_rag_api",
+                "WARNING: bridge is bound to a non-loopback host without api_key. Remote no-auth requests will be blocked by default.",
+            )
         await self.server.serve()
 
     async def on_shutdown(self):
@@ -61,6 +79,15 @@ class ZapRagApi(core.module.Module):
             self.server.should_exit = True
             await asyncio.sleep(0.25)
 
+    def _setup_exception_handlers(self):
+        @self.app.exception_handler(Exception)
+        async def unhandled_exception_handler(request: Request, exc: Exception):
+            self.log("zap_rag_api", f"Unhandled API error on {request.url.path}: {exc}")
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "issue": f"Unhandled zap_rag_api error: {exc}"},
+            )
+
     def _setup_routes(self):
         @self.app.get("/rag/health")
         @self.app.get("/api/rag/health")
@@ -68,10 +95,12 @@ class ZapRagApi(core.module.Module):
             await self._authorize(request)
             rag = self._rag_module(required=False)
             return {
+                "success": True,
                 "status": "ok",
                 "service": "zap_rag_api",
                 "rag_pro_loaded": rag is not None,
                 "endpoint": f"http://{self.host}:{self.port}",
+                "auth_required": self._auth_required_for_request(request),
             }
 
         @self.app.get("/rag/files")
@@ -80,8 +109,8 @@ class ZapRagApi(core.module.Module):
             await self._authorize(request)
             rag = self._rag_module()
             if hasattr(rag, "list_knowledge_files_structured"):
-                return {"files": await rag.list_knowledge_files_structured()}
-            return {"files_text": await rag.list_knowledge_files()}
+                return {"success": True, "files": await rag.list_knowledge_files_structured()}
+            return {"success": True, "files_text": await rag.list_knowledge_files()}
 
         @self.app.post("/rag/ingest")
         @self.app.post("/api/rag/ingest")
@@ -90,9 +119,13 @@ class ZapRagApi(core.module.Module):
             rag = self._rag_module()
             if hasattr(rag, "ingest_folder") and hasattr(rag, "knowledge_path"):
                 result = await rag.ingest_folder(rag.knowledge_path)
-                return {"success": True, "ingest": result}
-            success = await rag._safe_ingest()
-            return {"success": bool(success)}
+            else:
+                success = await rag._safe_ingest()
+                result = {"success": bool(success)}
+
+            if not result.get("success", False):
+                raise HTTPException(status_code=503, detail=result)
+            return {"success": True, "ingest": result}
 
         @self.app.post("/rag/search")
         @self.app.post("/api/rag/search")
@@ -112,6 +145,7 @@ class ZapRagApi(core.module.Module):
 
             text_result = await rag.search(query)
             return {
+                "success": True,
                 "results": [
                     {
                         "source": "rag_pro",
@@ -119,7 +153,7 @@ class ZapRagApi(core.module.Module):
                         "score": 0.0,
                         "tags": [],
                     }
-                ]
+                ],
             }
 
         @self.app.post("/rag/read")
@@ -129,10 +163,13 @@ class ZapRagApi(core.module.Module):
             rag = self._rag_module()
             data = await self._json_body(request)
             file_name = str(data.get("file_name") or data.get("source") or "").strip()
-            page = int(data.get("page") or 1)
+            page = self._safe_int(data.get("page") or 1, 1, 1, 1000000)
             if not file_name:
                 raise HTTPException(status_code=400, detail="file_name is required")
-            return {"content": await rag.read_document(file_name, page=page)}
+            content = await rag.read_document(file_name, page=page)
+            success = not str(content).startswith("Error:")
+            status_code = 200 if success else 404
+            return JSONResponse(status_code=status_code, content={"success": success, "content": content})
 
         @self.app.post("/rag/save-note")
         @self.app.post("/api/rag/save-note")
@@ -146,17 +183,26 @@ class ZapRagApi(core.module.Module):
             if not body.strip():
                 raise HTTPException(status_code=400, detail="body is required")
 
-            if hasattr(rag, "save_note"):
-                result = await rag.save_note(title, body, tags)
-                return {"success": True, **result}
+            if not hasattr(rag, "save_note"):
+                raise HTTPException(status_code=501, detail="rag_pro.save_note is unavailable")
 
-            raise HTTPException(status_code=501, detail="rag_pro.save_note is unavailable")
+            result = await rag.save_note(title, body, tags)
+            if not result.get("success", False):
+                raise HTTPException(status_code=503, detail=result)
+            return result
 
     async def _authorize(self, request: Request):
         api_key = str(self.config.get("api_key", default="") or "")
-        require_api_key = bool(self.config.get("require_api_key", default=False))
+        require_api_key = self._as_bool(self.config.get("require_api_key", default=False))
+        allow_no_auth_remote = self._as_bool(self.config.get("allow_no_auth_remote", default=False))
+
+        if not api_key and require_api_key:
+            raise HTTPException(status_code=503, detail="API key is required but zap_rag_api.api_key is empty.")
+
         if not api_key and not require_api_key:
-            return True
+            if allow_no_auth_remote or self._is_loopback_request(request):
+                return True
+            raise HTTPException(status_code=401, detail="Unauthenticated remote requests are disabled.")
 
         auth_header = request.headers.get("authorization", "")
         bearer = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
@@ -170,24 +216,64 @@ class ZapRagApi(core.module.Module):
         try:
             data = await request.json()
         except Exception:
-            return {}
-        return data if isinstance(data, dict) else {}
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="JSON body must be an object")
+        return data
 
     def _rag_module(self, required=True):
         rag = self.manager.modules.get("rag_pro")
         if rag is None and required:
             raise HTTPException(
                 status_code=503,
-                detail="rag_pro is not loaded. Enable the rag_pro user module first."
+                detail="rag_pro is not loaded. Enable the rag_pro user module first.",
             )
         return rag
 
     def _result_count(self, data: dict[str, Any]):
-        default_results = int(self.config.get("default_results", default=6) or 6)
-        max_results = int(self.config.get("max_results", default=25) or 25)
+        default_results = self._safe_int(self.config.get("default_results", default=6), 6, 1, 100)
+        max_results = self._safe_int(self.config.get("max_results", default=25), 25, 1, 100)
         requested = data.get("n_results", data.get("nResults", default_results))
+        return self._safe_int(requested, default_results, 1, max_results)
+
+    def _auth_required_for_request(self, request: Request):
+        api_key = str(self.config.get("api_key", default="") or "")
+        require_api_key = self._as_bool(self.config.get("require_api_key", default=False))
+        if api_key or require_api_key:
+            return True
+        return not self._is_loopback_request(request)
+
+    def _remote_bind_without_auth(self):
+        api_key = str(self.config.get("api_key", default="") or "")
+        require_api_key = self._as_bool(self.config.get("require_api_key", default=False))
+        return not api_key and not require_api_key and self.host not in {"127.0.0.1", "localhost", "::1"}
+
+    @staticmethod
+    def _safe_int(value, default, min_value=None, max_value=None):
         try:
-            value = int(requested)
+            parsed = int(value)
         except Exception:
-            value = default_results
-        return max(1, min(value, max_results))
+            parsed = default
+        if min_value is not None:
+            parsed = max(min_value, parsed)
+        if max_value is not None:
+            parsed = min(max_value, parsed)
+        return parsed
+
+    @staticmethod
+    def _as_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _is_loopback_request(request: Request):
+        if request.client is None or request.client.host is None:
+            return False
+        host = request.client.host
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return host in {"localhost"}
