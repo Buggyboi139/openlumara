@@ -10,10 +10,7 @@ from sentence_transformers import SentenceTransformer
 
 
 class RagPro(core.module.Module):
-    """
-    The Pro RAG Module.
-    Indexes docs from data/knowledge and allows AI retrieval and deep reading.
-    """
+    """Local knowledge-base RAG module used by OpenLumara and ZAP Cockpit."""
 
     SUPPORTED_EXTS = (".md", ".txt", ".json", ".har", ".yaml", ".yml")
     DEFAULT_CHUNK_SIZE = 2000
@@ -26,40 +23,40 @@ class RagPro(core.module.Module):
     settings = {
         "knowledge_folder": {
             "description": "The folder within /data to store yer documents",
-            "default": "knowledge"
+            "default": "knowledge",
         },
         "embedding_model": {
             "description": "SentenceTransformer model name or local path used for embeddings.",
-            "default": "all-MiniLM-L6-v2"
+            "default": "all-MiniLM-L6-v2",
         },
         "local_files_only": {
             "description": "Only load the embedding model from local cache/files. Disable this to allow first-run downloads.",
-            "default": True
+            "default": True,
         },
         "auto_ingest_on_ready": {
             "description": "Automatically index the knowledge folder when OpenLumara starts.",
-            "default": False
+            "default": False,
         },
         "chunk_size": {
             "description": "Character chunk size for knowledge ingestion.",
-            "default": DEFAULT_CHUNK_SIZE
+            "default": DEFAULT_CHUNK_SIZE,
         },
         "chunk_overlap": {
             "description": "Character overlap between chunks during ingestion.",
-            "default": DEFAULT_CHUNK_OVERLAP
+            "default": DEFAULT_CHUNK_OVERLAP,
         },
         "max_file_size_mb": {
             "description": "Maximum single knowledge file size to ingest. Large HARs and dumps can be split manually.",
-            "default": DEFAULT_MAX_FILE_SIZE_MB
+            "default": DEFAULT_MAX_FILE_SIZE_MB,
         },
         "max_search_results": {
             "description": "Maximum structured search results returned to API clients.",
-            "default": DEFAULT_MAX_SEARCH_RESULTS
+            "default": DEFAULT_MAX_SEARCH_RESULTS,
         },
         "save_note_auto_ingest": {
             "description": "Automatically ingest ZAP notes immediately after saving them.",
-            "default": True
-        }
+            "default": True,
+        },
     }
     dependencies = ["chromadb", "sentence-transformers", "langchain-text-splitters"]
 
@@ -106,39 +103,17 @@ class RagPro(core.module.Module):
             return False
 
     async def ingest_folder(self, folder_path=None):
-        """
-        Ingest supported knowledge files. Returns structured status for API callers.
-        One bad file is reported, not allowed to kill the whole ingest because apparently resilience matters.
-        """
         folder_path = os.path.abspath(folder_path or self.knowledge_path)
         if not self._is_inside_knowledge(folder_path, allow_root=True):
-            return {
-                "success": False,
-                "indexed_files": 0,
-                "indexed_chunks": 0,
-                "skipped_files": [],
-                "errors": [f"Refusing to ingest outside knowledge folder: {folder_path}"],
-            }
+            return self._ingest_result(False, errors=[f"Refusing to ingest outside knowledge folder: {folder_path}"])
         if not os.path.isdir(folder_path):
-            return {
-                "success": False,
-                "indexed_files": 0,
-                "indexed_chunks": 0,
-                "skipped_files": [],
-                "errors": [f"Knowledge folder does not exist: {folder_path}"],
-            }
+            return self._ingest_result(False, errors=[f"Knowledge folder does not exist: {folder_path}"])
 
         async with self._ingest_lock:
             try:
                 embedder = await asyncio.to_thread(self._get_embedder)
             except Exception as e:
-                return {
-                    "success": False,
-                    "indexed_files": 0,
-                    "indexed_chunks": 0,
-                    "skipped_files": [],
-                    "errors": [str(e)],
-                }
+                return self._ingest_result(False, errors=[str(e)])
 
             chunk_size = self._safe_int(
                 self.config.get("chunk_size", default=self.DEFAULT_CHUNK_SIZE),
@@ -196,7 +171,6 @@ class RagPro(core.module.Module):
 
                         embeddings = await asyncio.to_thread(embedder.encode, chunks)
                         embeddings_list = embeddings.tolist()
-
                         ids = [f"{source}_{i}" for i in range(len(chunks))]
                         metadatas = [
                             {
@@ -220,19 +194,18 @@ class RagPro(core.module.Module):
                     except Exception as e:
                         errors.append({"source": source, "error": str(e)})
 
+            deleted_stale = 0
             if os.path.abspath(folder_path) == self.knowledge_path:
                 deleted_stale = await self._delete_missing_sources()
-            else:
-                deleted_stale = 0
 
-            return {
-                "success": not errors,
-                "indexed_files": indexed_files,
-                "indexed_chunks": indexed_chunks,
-                "skipped_files": skipped_files,
-                "errors": errors,
-                "deleted_stale_sources": deleted_stale,
-            }
+            return self._ingest_result(
+                not errors,
+                indexed_files=indexed_files,
+                indexed_chunks=indexed_chunks,
+                skipped_files=skipped_files,
+                errors=errors,
+                deleted_stale_sources=deleted_stale,
+            )
 
     async def list_knowledge_files_structured(self):
         def _get_files():
@@ -244,11 +217,10 @@ class RagPro(core.module.Module):
                     path = os.path.abspath(os.path.join(root, name))
                     if not os.path.isfile(path):
                         continue
-                    rel_path = self._source_for_path(path)
                     stat = os.stat(path)
                     files.append({
                         "name": name,
-                        "path": rel_path,
+                        "path": self._source_for_path(path),
                         "size": stat.st_size,
                         "mtime": stat.st_mtime,
                     })
@@ -258,15 +230,10 @@ class RagPro(core.module.Module):
         return await asyncio.to_thread(_get_files)
 
     async def list_knowledge_files(self):
-        """
-        Lists all files currently stored in the local knowledge directory.
-        Use this tool to see what documents are available to read or search.
-        """
         try:
             files = await self.list_knowledge_files_structured()
             if not files:
                 return "The knowledge directory is currently empty."
-
             output = "Files currently in the knowledge directory:\n"
             for item in files:
                 output += f"- {item['path']}\n"
@@ -275,10 +242,6 @@ class RagPro(core.module.Module):
             return f"Error listing directory: {e}"
 
     async def search_structured(self, query: str, context: dict | None = None, n_results: int = None):
-        """
-        Search the local knowledge base and return structured JSON-friendly results.
-        Intended for programmatic clients such as the ZAP Cockpit Lumara RAG bridge.
-        """
         if not query or not query.strip():
             return {"success": False, "results": [], "issue": "A non-empty search query is required."}
 
@@ -298,19 +261,17 @@ class RagPro(core.module.Module):
         except Exception as e:
             return {"success": False, "results": [], "issue": f"RAG search is unavailable: {e}"}
 
-        query_embedding = query_embedding_array.tolist()
-
         try:
             results = await asyncio.to_thread(
                 self.collection.query,
-                query_embeddings=[query_embedding],
+                query_embeddings=[query_embedding_array.tolist()],
                 n_results=safe_n_results,
                 include=["documents", "metadatas", "distances"],
             )
         except TypeError:
             results = await asyncio.to_thread(
                 self.collection.query,
-                query_embeddings=[query_embedding],
+                query_embeddings=[query_embedding_array.tolist()],
                 n_results=safe_n_results,
             )
         except Exception as e:
@@ -339,14 +300,6 @@ class RagPro(core.module.Module):
         return {"success": True, "results": output, "query": enriched_query}
 
     async def search(self, query: str):
-        """
-        Search the user's private, local knowledge base and documents.
-        CRITICAL RULE: ALWAYS use this tool FIRST before using web_search.
-        If the search returns a file that looks highly relevant, use the 'read_document' tool to read the full file!
-
-        Args:
-            query: The search query to look for in the local document database.
-        """
         structured = await self.search_structured(query, n_results=3)
         if structured.get("issue"):
             return structured["issue"]
@@ -356,20 +309,10 @@ class RagPro(core.module.Module):
         output = "Local Knowledge Base Results:\n\n"
         for item in structured["results"]:
             output += f"**Source:** {item.get('source', '')}\n{item.get('text', '')}\n---\n"
-
         output += "\nTIP: If one of these sources looks like it has the full answer, you can read the entire file by passing the 'Source' filename into the 'read_document' tool!"
         return output
 
     async def read_document(self, file_name: str, page: int = 1):
-        """
-        Reads a full document from the local knowledge base.
-        Because files can be massive, it returns the text in Pages.
-        If you need to read more of the file, call this tool again and increase the page number.
-
-        Args:
-            file_name: The exact name or relative knowledge path.
-            page: The page number to read (starts at 1).
-        """
         target_path, display_name = self._resolve_knowledge_path(file_name)
         if not target_path:
             return f"Error: Could not find '{file_name}' in the knowledge folder. Double check the file name."
@@ -382,26 +325,22 @@ class RagPro(core.module.Module):
                     content = f.read()
 
                 chars_per_page = 4000
-                total_length = len(content)
-                total_pages = max(1, (total_length // chars_per_page) + 1)
+                total_pages = max(1, (len(content) // chars_per_page) + 1)
                 selected_page = max(1, min(safe_page, total_pages))
                 start_idx = (selected_page - 1) * chars_per_page
                 end_idx = start_idx + chars_per_page
                 page_text = content[start_idx:end_idx]
-
-                return (f"--- {display_name} (Page {selected_page} of {total_pages}) ---\n\n"
-                        f"{page_text}\n\n"
-                        f"--- End of Page {selected_page} ---")
+                return (
+                    f"--- {display_name} (Page {selected_page} of {total_pages}) ---\n\n"
+                    f"{page_text}\n\n"
+                    f"--- End of Page {selected_page} ---"
+                )
             except Exception as e:
                 return f"Error reading file: {e}"
 
         return await asyncio.to_thread(_read_paginated)
 
     async def save_note(self, title: str, body: str, tags: list | None = None):
-        """
-        Save a markdown note into data/knowledge/zap-notes and ingest it.
-        This is used by the ZAP Cockpit Lumara RAG bridge.
-        """
         if not body or not str(body).strip():
             return {"success": False, "issue": "Note body is required."}
 
@@ -442,7 +381,6 @@ class RagPro(core.module.Module):
     def _resolve_knowledge_path(self, file_name: str):
         if not file_name:
             return None, ""
-
         requested = str(file_name).replace("\\", "/").strip().lstrip("/")
         candidates = []
         if requested:
@@ -461,7 +399,6 @@ class RagPro(core.module.Module):
                     candidate = os.path.abspath(os.path.join(root, base_name))
                     if self._is_inside_knowledge(candidate):
                         return candidate, self._source_for_path(candidate)
-
         return None, requested
 
     async def _delete_source(self, source: str):
@@ -497,20 +434,15 @@ class RagPro(core.module.Module):
                 value = context.get(key)
                 if value:
                     parts.append(str(value))
-
             for key in ("headers", "query_params", "body_params", "cookie_names", "signals"):
                 values = context.get(key)
                 if isinstance(values, list):
                     parts.extend(str(value) for value in values if str(value).strip())
-
         enriched = " ".join(parts)
-        if len(enriched) > self.MAX_ENRICHED_QUERY_CHARS:
-            return enriched[:self.MAX_ENRICHED_QUERY_CHARS]
-        return enriched
+        return enriched[:self.MAX_ENRICHED_QUERY_CHARS]
 
     def _tags_for_result(self, meta: dict, doc: str):
         haystack = f"{meta.get('source', '')} {doc}".lower()
-        tags = []
         tag_terms = {
             "idor": ("idor", "bola", "object authorization"),
             "jwt": ("jwt", "bearer", "claim"),
@@ -521,10 +453,7 @@ class RagPro(core.module.Module):
             "xss": ("xss", "cross-site scripting"),
             "sqli": ("sql injection", "sqli"),
         }
-        for tag, needles in tag_terms.items():
-            if any(needle in haystack for needle in needles):
-                tags.append(tag)
-        return tags
+        return [tag for tag, needles in tag_terms.items() if any(needle in haystack for needle in needles)]
 
     def _safe_filename(self, value: str):
         cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", str(value)).strip().replace(" ", "_")
@@ -547,9 +476,45 @@ class RagPro(core.module.Module):
             return True
         return path_abs.startswith(self.knowledge_path + os.sep)
 
+    def _ingest_result(self, success, indexed_files=0, indexed_chunks=0, skipped_files=None, errors=None, deleted_stale_sources=0):
+        return {
+            "success": bool(success),
+            "indexed_files": indexed_files,
+            "indexed_chunks": indexed_chunks,
+            "skipped_files": skipped_files or [],
+            "errors": errors or [],
+            "deleted_stale_sources": deleted_stale_sources,
+        }
+
     @staticmethod
     def _safe_int(value, default, min_value=None, max_value=None):
         try:
             parsed = int(value)
         except Exception:
             parsed = default
+        if min_value is not None:
+            parsed = max(min_value, parsed)
+        if max_value is not None:
+            parsed = min(max_value, parsed)
+        return parsed
+
+    @staticmethod
+    def _as_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    @core.module.command("rag_search")
+    async def rag_search_cmd(self, args: list):
+        query = " ".join(args)
+        if not query:
+            return "What be ye lookin' for, matey?"
+        return await self.search(query)
+
+    @core.module.command("rag_ingest")
+    async def rag_ingest_cmd(self, args: list):
+        if await self._safe_ingest():
+            return "Aye aye! I just finished updating the knowledge database with any new scrolls ye added!"
+        return "RAG ingest failed. Check the logs for the embedding model error."
