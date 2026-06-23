@@ -19,32 +19,32 @@ class ZapRagApi(core.module.Module):
     settings = {
         "host": {
             "description": "Host for the ZAP RAG bridge. Keep this local unless you know exactly why you are exposing it.",
-            "default": "127.0.0.1"
+            "default": "127.0.0.1",
         },
         "port": {
             "description": "Port for the ZAP RAG bridge. ZAP Cockpit defaults to http://127.0.0.1:5000.",
-            "default": 5000
+            "default": 5000,
         },
         "api_key": {
             "description": "Optional bearer token required from ZAP Cockpit. Leave empty for local-only no-auth mode.",
-            "default": ""
+            "default": "",
         },
         "require_api_key": {
             "description": "Require the api_key even when bound to localhost.",
-            "default": False
+            "default": False,
         },
         "allow_no_auth_remote": {
             "description": "Allow unauthenticated requests from non-loopback clients. Leave false unless isolated by other controls.",
-            "default": False
+            "default": False,
         },
         "default_results": {
             "description": "Default number of RAG results returned to ZAP Cockpit.",
-            "default": 6
+            "default": 6,
         },
         "max_results": {
             "description": "Maximum number of RAG results a client may request.",
-            "default": 25
-        }
+            "default": 25,
+        },
     }
     dependencies = ["fastapi", "uvicorn"]
 
@@ -64,6 +64,7 @@ class ZapRagApi(core.module.Module):
             port=self.port,
             log_level="error",
             access_log=False,
+            http="h11",
         )
         self.server = uvicorn.Server(config)
         self.log("zap_rag_api", f"Starting ZAP RAG API on http://{self.host}:{self.port}")
@@ -229,13 +230,36 @@ class ZapRagApi(core.module.Module):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def _json_body(self, request: Request):
+        raw = await request.body()
+        query_params = dict(request.query_params)
+        if not raw:
+            return query_params
+
+        content_type = request.headers.get("content-type", "").lower()
+        if "application/x-www-form-urlencoded" in content_type:
+            parsed = parse_qs(raw.decode("utf-8", errors="ignore"), keep_blank_values=True)
+            data = {key: values[-1] if values else "" for key, values in parsed.items()}
+            data.update(query_params)
+            return data
+
         try:
             data = await request.json()
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=400, detail="JSON body must be an object")
-        return data
+            text = raw.decode("utf-8", errors="ignore").strip()
+            if text:
+                data = {"query": text}
+                data.update(query_params)
+                return data
+            return query_params
+
+        if isinstance(data, dict):
+            data.update(query_params)
+            return data
+
+        if isinstance(data, str) and data.strip():
+            data = {"query": data.strip()}
+            data.update(query_params)
+            return data
 
         return query_params
 
