@@ -18,7 +18,14 @@ class RagPro(core.module.Module):
     DEFAULT_MAX_FILE_SIZE_MB = 15
     DEFAULT_SEARCH_RESULTS = 5
     DEFAULT_MAX_SEARCH_RESULTS = 25
+    DEFAULT_CANDIDATE_MULTIPLIER = 5
     MAX_ENRICHED_QUERY_CHARS = 12000
+    STOPWORDS = {
+        "a", "about", "after", "all", "also", "an", "and", "any", "are", "as", "at", "be", "by", "can",
+        "for", "from", "has", "have", "here", "how", "http", "https", "i", "in", "into", "is", "it",
+        "me", "my", "of", "on", "or", "request", "the", "this", "to", "what", "when", "where", "with",
+        "zap", "rag", "lumara", "manual", "testing", "bug", "bounty",
+    }
 
     settings = {
         "knowledge_folder": {
@@ -52,6 +59,14 @@ class RagPro(core.module.Module):
         "max_search_results": {
             "description": "Maximum structured search results returned to API clients.",
             "default": DEFAULT_MAX_SEARCH_RESULTS,
+        },
+        "candidate_multiplier": {
+            "description": "How many vector candidates to retrieve before hybrid reranking.",
+            "default": DEFAULT_CANDIDATE_MULTIPLIER,
+        },
+        "hybrid_rerank": {
+            "description": "Rerank vector matches with keyword, tag, source, and ZAP context signals.",
+            "default": True,
         },
         "save_note_auto_ingest": {
             "description": "Automatically ingest ZAP notes immediately after saving them.",
@@ -137,6 +152,7 @@ class RagPro(core.module.Module):
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                separators=["\n## ", "\n### ", "\n```", "\n\n", "\n", " ", ""],
             )
 
             indexed_files = 0
@@ -178,6 +194,7 @@ class RagPro(core.module.Module):
                                 "full_path": path,
                                 "mtime": stat.st_mtime,
                                 "size": stat.st_size,
+                                "kind": self._kind_for_source(source),
                             }
                             for _ in chunks
                         ]
@@ -223,6 +240,7 @@ class RagPro(core.module.Module):
                         "path": self._source_for_path(path),
                         "size": stat.st_size,
                         "mtime": stat.st_mtime,
+                        "kind": self._kind_for_source(self._source_for_path(path)),
                     })
             files.sort(key=lambda item: item["path"].lower())
             return files
@@ -253,6 +271,13 @@ class RagPro(core.module.Module):
         )
         requested_results = n_results if n_results is not None else self.DEFAULT_SEARCH_RESULTS
         safe_n_results = self._safe_int(requested_results, self.DEFAULT_SEARCH_RESULTS, min_value=1, max_value=max_results)
+        candidate_multiplier = self._safe_int(
+            self.config.get("candidate_multiplier", default=self.DEFAULT_CANDIDATE_MULTIPLIER),
+            self.DEFAULT_CANDIDATE_MULTIPLIER,
+            min_value=1,
+            max_value=10,
+        )
+        candidate_count = max(safe_n_results, min(max_results, safe_n_results * candidate_multiplier))
         enriched_query = self._enrich_query(query, context or {})
 
         try:
@@ -265,14 +290,14 @@ class RagPro(core.module.Module):
             results = await asyncio.to_thread(
                 self.collection.query,
                 query_embeddings=[query_embedding_array.tolist()],
-                n_results=safe_n_results,
+                n_results=candidate_count,
                 include=["documents", "metadatas", "distances"],
             )
         except TypeError:
             results = await asyncio.to_thread(
                 self.collection.query,
                 query_embeddings=[query_embedding_array.tolist()],
-                n_results=safe_n_results,
+                n_results=candidate_count,
             )
         except Exception as e:
             return {"success": False, "results": [], "issue": f"RAG query failed: {e}"}
@@ -285,19 +310,26 @@ class RagPro(core.module.Module):
         for index, doc in enumerate(docs):
             meta = metas[index] if index < len(metas) and metas[index] else {}
             distance = distances[index] if index < len(distances) else None
+            tags = self._tags_for_result(meta, doc)
             item = {
                 "source": meta.get("source", ""),
                 "path": meta.get("full_path", ""),
+                "kind": meta.get("kind") or self._kind_for_source(meta.get("source", "")),
                 "text": doc,
                 "chunk": doc,
-                "tags": self._tags_for_result(meta, doc),
+                "tags": tags,
             }
             if distance is not None:
                 item["distance"] = float(distance)
                 item["score"] = float(1.0 / (1.0 + max(float(distance), 0.0)))
+            else:
+                item["score"] = 0.0
             output.append(item)
 
-        return {"success": True, "results": output, "query": enriched_query}
+        if self._as_bool(self.config.get("hybrid_rerank", default=True)):
+            output = self._rerank_results(output, query, enriched_query, context or {})
+
+        return {"success": True, "results": output[:safe_n_results], "query": enriched_query}
 
     async def search(self, query: str):
         structured = await self.search_structured(query, n_results=3)
@@ -345,7 +377,9 @@ class RagPro(core.module.Module):
             return {"success": False, "issue": "Note body is required."}
 
         safe_title = self._safe_filename(title or "ZAP Cockpit Note")
+        display_title = str(title or "ZAP Cockpit Note").strip()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        iso_timestamp = datetime.now(timezone.utc).isoformat()
         folder = os.path.abspath(os.path.join(self.knowledge_path, "zap-notes"))
         os.makedirs(folder, exist_ok=True)
         filename = f"{timestamp}_{safe_title}.md"
@@ -354,8 +388,22 @@ class RagPro(core.module.Module):
             return {"success": False, "issue": "Invalid note filename."}
 
         safe_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
+        for required_tag in ("zap-cockpit", "zap-note", "saved-note"):
+            if required_tag not in safe_tags:
+                safe_tags.append(required_tag)
         tag_line = ", ".join(safe_tags)
-        content = str(body)
+        content = str(body).strip()
+        if not content.startswith("---"):
+            content = (
+                "---\n"
+                "source: zap-cockpit\n"
+                f"title: {display_title}\n"
+                f"saved_at: {iso_timestamp}\n"
+                f"tags: [{tag_line}]\n"
+                "---\n\n"
+                f"# {display_title}\n\n"
+                f"{content}\n"
+            )
         if tag_line and "## Tags" not in content:
             content = f"{content.rstrip()}\n\n## Tags\n\n{tag_line}\n"
 
@@ -369,14 +417,142 @@ class RagPro(core.module.Module):
             "saved": True,
             "file": filename,
             "path": self._source_for_path(target_path),
+            "tags": safe_tags,
         }
         if self._as_bool(self.config.get("save_note_auto_ingest", default=True)):
             ingest_result = await self.ingest_folder(folder)
             result["ingest"] = ingest_result
+            result["searchable"] = bool(ingest_result.get("success", False))
             if not ingest_result.get("success", False):
                 result["success"] = False
                 result["issue"] = "Note was saved, but automatic ingest failed."
+        else:
+            result["searchable"] = False
         return result
+
+    def _rerank_results(self, results: list[dict], query: str, enriched_query: str, context: dict):
+        query_tokens = self._tokens(enriched_query)
+        context_terms = self._context_terms(context)
+        seen_sources = {}
+        seen_text = set()
+        ranked = []
+
+        for item in results:
+            source = item.get("source", "")
+            text = item.get("text", "") or ""
+            tags = item.get("tags", []) or []
+            fingerprint = self._text_fingerprint(text)
+            if fingerprint in seen_text:
+                continue
+            seen_text.add(fingerprint)
+
+            vector_score = float(item.get("score") or 0.0)
+            keyword_score = self._keyword_score(query_tokens, source, text, tags)
+            tag_score = self._tag_score(query, tags, text)
+            context_score = self._context_score(context_terms, source, text, tags)
+            mode_score = self._mode_score(query, source, text, tags)
+            note_score = 0.08 if self._kind_for_source(source) == "zap-note" and self._note_intent(query) else 0.0
+            source_repeat = seen_sources.get(source, 0)
+            diversity_penalty = min(0.15, source_repeat * 0.05)
+
+            rerank_score = (
+                (vector_score * 0.55)
+                + (keyword_score * 0.18)
+                + (tag_score * 0.12)
+                + (context_score * 0.10)
+                + mode_score
+                + note_score
+                - diversity_penalty
+            )
+            item["vector_score"] = vector_score
+            item["keyword_score"] = keyword_score
+            item["rerank_score"] = float(rerank_score)
+            item["score"] = float(rerank_score)
+            ranked.append(item)
+            seen_sources[source] = source_repeat + 1
+
+        ranked.sort(key=lambda row: row.get("rerank_score", 0.0), reverse=True)
+        return ranked
+
+    def _keyword_score(self, query_tokens: set[str], source: str, text: str, tags: list[str]):
+        if not query_tokens:
+            return 0.0
+        haystack_tokens = self._tokens(" ".join([source, text, " ".join(tags or [])]))
+        if not haystack_tokens:
+            return 0.0
+        overlap = query_tokens & haystack_tokens
+        return min(1.0, len(overlap) / max(4, len(query_tokens)))
+
+    def _tag_score(self, query: str, tags: list[str], text: str):
+        haystack = f"{query} {text}".lower()
+        score = 0.0
+        for tag in tags or []:
+            normalized = str(tag).lower()
+            if normalized in haystack:
+                score += 0.15
+            elif normalized.replace("-", " ") in haystack:
+                score += 0.12
+        return min(0.6, score)
+
+    def _context_score(self, context_terms: set[str], source: str, text: str, tags: list[str]):
+        if not context_terms:
+            return 0.0
+        haystack_tokens = self._tokens(" ".join([source, text, " ".join(tags or [])]))
+        overlap = context_terms & haystack_tokens
+        return min(1.0, len(overlap) / max(5, len(context_terms)))
+
+    def _mode_score(self, query: str, source: str, text: str, tags: list[str]):
+        q = query.lower()
+        haystack = f"{source} {text} {' '.join(tags or [])}".lower()
+        score = 0.0
+        if any(term in q for term in ("payload", "fuzz", "mutation", "bypass", "example")):
+            for term in ("payload", "example", "fuzz", "bypass", "tamper", "mutation", "curl", "wordlist", "test value"):
+                if term in haystack:
+                    score += 0.035
+        if any(term in q for term in ("checklist", "methodology", "verify", "test plan", "suggest")):
+            for term in ("checklist", "steps", "verify", "reproduce", "expected", "impact", "methodology", "test plan"):
+                if term in haystack:
+                    score += 0.035
+        if any(term in q for term in ("note", "observed", "saved", "zap-note")) and "zap-notes/" in source:
+            score += 0.12
+        return min(0.35, score)
+
+    def _context_terms(self, context: dict):
+        terms = set()
+        if isinstance(context, dict):
+            for key in ("method", "path", "target_uri", "host"):
+                terms.update(self._tokens(str(context.get(key) or "")))
+            for key in ("headers", "query_params", "body_params", "cookie_names", "signals"):
+                values = context.get(key)
+                if isinstance(values, list):
+                    for value in values:
+                        terms.update(self._tokens(str(value)))
+        return terms - self.STOPWORDS
+
+    def _tokens(self, value: str):
+        tokens = set()
+        for token in re.findall(r"[A-Za-z0-9_.-]{2,}", str(value).lower()):
+            token = token.strip("._-")
+            if len(token) < 2 or token in self.STOPWORDS:
+                continue
+            tokens.add(token)
+        return tokens
+
+    def _text_fingerprint(self, text: str):
+        compact = re.sub(r"\s+", " ", str(text).strip().lower())
+        return compact[:600]
+
+    def _note_intent(self, query: str):
+        q = query.lower()
+        return any(term in q for term in ("note", "saved", "observed", "zap-note", "what did i try", "previous"))
+
+    def _kind_for_source(self, source: str):
+        source = str(source or "").replace("\\", "/")
+        if source.startswith("zap-notes/"):
+            return "zap-note"
+        if source.lower().endswith(".har"):
+            return "har"
+        return "knowledge"
 
     def _resolve_knowledge_path(self, file_name: str):
         if not file_name:
@@ -430,7 +606,7 @@ class RagPro(core.module.Module):
     def _enrich_query(self, query: str, context: dict):
         parts = [str(query)]
         if isinstance(context, dict):
-            for key in ("method", "path", "target_uri"):
+            for key in ("method", "path", "target_uri", "host"):
                 value = context.get(key)
                 if value:
                     parts.append(str(value))
@@ -444,14 +620,22 @@ class RagPro(core.module.Module):
     def _tags_for_result(self, meta: dict, doc: str):
         haystack = f"{meta.get('source', '')} {doc}".lower()
         tag_terms = {
-            "idor": ("idor", "bola", "object authorization"),
-            "jwt": ("jwt", "bearer", "claim"),
-            "mass-assignment": ("mass assignment", "isadmin", "role"),
-            "cors": ("cors", "access-control"),
-            "graphql": ("graphql",),
-            "ssrf": ("ssrf",),
-            "xss": ("xss", "cross-site scripting"),
-            "sqli": ("sql injection", "sqli"),
+            "idor": ("idor", "bola", "object authorization", "object-level authorization"),
+            "jwt": ("jwt", "bearer", "claim", "jwk", "jwks"),
+            "mass-assignment": ("mass assignment", "isadmin", "is_admin", "role", "permissions"),
+            "cors": ("cors", "access-control", "origin"),
+            "graphql": ("graphql", "introspection"),
+            "ssrf": ("ssrf", "server-side request forgery", "metadata", "169.254.169.254"),
+            "xss": ("xss", "cross-site scripting", "script"),
+            "sqli": ("sql injection", "sqli", "union select"),
+            "open-redirect": ("open redirect", "redirect_uri", "returnurl", "next="),
+            "path-traversal": ("path traversal", "../", "..%2f", "file read"),
+            "file-upload": ("file upload", "multipart/form-data", "filename="),
+            "cache": ("cache poisoning", "web cache", "x-forwarded-host", "cache-control"),
+            "oauth": ("oauth", "oidc", "redirect_uri", "client_id"),
+            "websocket": ("websocket", "upgrade: websocket"),
+            "request-smuggling": ("request smuggling", "content-length", "transfer-encoding"),
+            "zap-note": ("zap-note", "zap-notes/", "source: zap-cockpit"),
         }
         return [tag for tag, needles in tag_terms.items() if any(needle in haystack for needle in needles)]
 
