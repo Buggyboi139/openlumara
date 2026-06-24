@@ -10,12 +10,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 try:
     import channels.webui as webui
-except Exception:  # pragma: no cover - webui may be disabled
+except Exception:
     webui = None
 
 
 class RagScopeApi(core.module.Module):
-    """First-class scoped RAG API for separated library docs and ZAP notes."""
+    """Scoped RAG API that keeps curated library docs and ZAP notes separate."""
 
     SUPPORTED_EXTS = (".md", ".txt", ".json", ".har", ".yaml", ".yml")
     VALID_SCOPES = {"library", "notes", "both"}
@@ -43,7 +43,7 @@ class RagScopeApi(core.module.Module):
             "default": True,
         },
         "default_search_scope": {
-            "description": "Default RAG search scope for old clients that do not pass scope.",
+            "description": "Default search scope for clients that do not pass scope.",
             "default": "library",
         },
         "max_file_size_mb": {
@@ -59,15 +59,32 @@ class RagScopeApi(core.module.Module):
     dependencies = ["fastapi", "langchain-text-splitters"]
 
     async def on_ready(self):
-        if webui is None:
-            self.log("rag_scope_api", "WebUI is not available; scoped RAG HTTP routes were not installed.")
-            return
-        self._ensure_dirs()
-        self._install_routes()
+        self.log("rag_scope_api", "Scoped RAG API module loaded; waiting for WebUI and rag_pro.")
+
+    async def on_background(self):
+        for _ in range(300):
+            if self._try_install_routes():
+                return
+            await asyncio.sleep(0.2)
+        self.log("rag_scope_api", "Scoped RAG routes were not installed. Enable webui and rag_pro.")
+
+    def _try_install_routes(self):
+        if RagScopeApi.ROUTES_INSTALLED:
+            return True
+        if webui is None or not getattr(webui, "channel_instance", None):
+            return False
+        if not self._rag_or_none():
+            return False
+        try:
+            self._ensure_dirs()
+            self._install_routes()
+            self.log("rag_scope_api", "Installed scoped RAG routes for library and notes.")
+            return True
+        except Exception as e:
+            self.log("rag_scope_api", f"Route install failed: {core.detail_error(e)}")
+            return False
 
     def _install_routes(self):
-        if RagScopeApi.ROUTES_INSTALLED:
-            return
         app = webui.app
         if self._as_bool(self.config.get("replace_existing_rag_routes", default=True)):
             self._remove_routes({
@@ -99,7 +116,7 @@ class RagScopeApi(core.module.Module):
                 tags=data.get("tags") if isinstance(data.get("tags"), list) else [],
                 note_path=data.get("path") or data.get("note_path") or data.get("source"),
                 target_uri=data.get("target_uri") or data.get("target") or data.get("url"),
-                auto_rename=bool(data.get("auto_rename")),
+                auto_rename=self._as_bool(data.get("auto_rename")),
                 ingest=not (data.get("ingest") is False),
             )
 
@@ -117,7 +134,7 @@ class RagScopeApi(core.module.Module):
             data = await self._json(request)
             scope = self._scope(data.get("scope") or request.query_params.get("scope"), "both")
             path = self._first_text(data.get("path"), data.get("source"), data.get("file"), data.get("title"), request.query_params.get("path"))
-            full = bool(data.get("full", data.get("entire", True)))
+            full = self._as_bool(data.get("full", data.get("entire", True)))
             page = self._safe_int(data.get("page") or request.query_params.get("page"), 1, 1, 1000000)
             return await self.read_document(path, scope=scope, full=full, page=page)
 
@@ -146,9 +163,7 @@ class RagScopeApi(core.module.Module):
             app.add_api_route(path, load_note, methods=["GET", "POST"])
         for path in ("/rag/rename-note", "/api/rag/rename-note"):
             app.add_api_route(path, rename_note, methods=["POST"])
-
         RagScopeApi.ROUTES_INSTALLED = True
-        self.log("rag_scope_api", "Installed scoped RAG routes for library and notes.")
 
     def _remove_routes(self, paths: set[str]):
         router = webui.app.router
@@ -184,9 +199,8 @@ class RagScopeApi(core.module.Module):
             embedder = await asyncio.to_thread(rag._get_embedder)
             enriched = rag._enrich_query(query, context) if hasattr(rag, "_enrich_query") else str(query)
             query_embedding = await asyncio.to_thread(embedder.encode, enriched)
-            collection = self._collection(scope)
             raw = await asyncio.to_thread(
-                collection.query,
+                self._collection(scope).query,
                 query_embeddings=[query_embedding.tolist()],
                 n_results=max(1, n_results * 5),
                 include=["documents", "metadatas", "distances"],
@@ -201,10 +215,9 @@ class RagScopeApi(core.module.Module):
         for index, doc in enumerate(docs):
             meta = metas[index] if index < len(metas) and metas[index] else {}
             distance = distances[index] if index < len(distances) else None
-            source = meta.get("source", "")
             tags = rag._tags_for_result(meta, doc) if hasattr(rag, "_tags_for_result") else []
             item = {
-                "source": source,
+                "source": meta.get("source", ""),
                 "path": meta.get("full_path", ""),
                 "kind": meta.get("kind") or scope,
                 "scope": scope,
@@ -232,13 +245,13 @@ class RagScopeApi(core.module.Module):
                 embedder = await asyncio.to_thread(rag._get_embedder)
             except Exception as e:
                 return self._ingest_result(False, errors=[str(e)])
-            collection = self._collection(scope)
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=self._safe_int(rag.config.get("chunk_size", default=2000), 2000, 250, 20000),
                 chunk_overlap=self._safe_int(rag.config.get("chunk_overlap", default=200), 200, 0, 5000),
                 separators=["\n## ", "\n### ", "\n```", "\n\n", "\n", " ", ""],
             )
             max_file_size = self._safe_int(self.config.get("max_file_size_mb", default=50), 50, 1, 1024) * 1024 * 1024
+            collection = self._collection(scope)
             indexed_files = 0
             indexed_chunks = 0
             skipped_files = []
@@ -259,7 +272,8 @@ class RagScopeApi(core.module.Module):
                         skipped_files.append({"source": source, "reason": "empty or no chunks"})
                         continue
                     embeddings = await asyncio.to_thread(embedder.encode, chunks)
-                    collection.upsert(
+                    await asyncio.to_thread(
+                        collection.upsert,
                         ids=[f"{scope}:{source}:{i}" for i in range(len(chunks))],
                         embeddings=embeddings.tolist(),
                         documents=chunks,
@@ -306,6 +320,7 @@ class RagScopeApi(core.module.Module):
         target = self._resolve_path(path, scope)
         if not target:
             return {"success": False, "issue": f"Could not find document or note: {path}", "content": ""}
+
         def _read():
             content = self._read_file(target)
             stat = os.stat(target)
@@ -347,7 +362,7 @@ class RagScopeApi(core.module.Module):
             title = self._target_to_title(target_uri)
         target = self._note_path(note_path or title)
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        display_title = title.replace("\\", "/").strip("/") or "DEFAULT"
+        display_title = self._title_for_source(self._source_for_path(target))
         safe_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()]
         for required in ("zap-cockpit", "zap-note", "saved-note"):
             if required not in safe_tags:
@@ -366,6 +381,7 @@ class RagScopeApi(core.module.Module):
                 f"{content}\n"
             )
         await asyncio.to_thread(self._write_file, target, content)
+        size = os.path.getsize(target)
         result = {
             "success": True,
             "saved": True,
@@ -373,8 +389,8 @@ class RagScopeApi(core.module.Module):
             "path": self._source_for_path(target),
             "scope": "notes",
             "tags": safe_tags,
-            "size": os.path.getsize(target),
-            "estimated_tokens": self._estimate_tokens(os.path.getsize(target)),
+            "size": size,
+            "estimated_tokens": self._estimate_tokens(size),
         }
         if ingest:
             result["ingest"] = await self._ingest_one("notes")
@@ -391,20 +407,21 @@ class RagScopeApi(core.module.Module):
         await self._ingest_one("notes")
         return {"success": True, "old_path": path, "path": self._source_for_path(target), "title": self._title_for_source(self._source_for_path(target))}
 
-    def _collection(self, scope: str):
-        name = "knowledge_notes" if scope == "notes" else "knowledge_library"
-        return self._rag().client.get_or_create_collection(name)
+    def _rag_or_none(self):
+        channel = getattr(webui, "channel_instance", None) if webui else None
+        return channel.manager.modules.get("rag_pro") if channel else None
 
     def _rag(self):
-        channel = webui.channel_instance
-        rag = channel.manager.modules.get("rag_pro") if channel else None
+        rag = self._rag_or_none()
         if not rag:
             raise HTTPException(status_code=503, detail="rag_pro module is not enabled")
         return rag
 
+    def _collection(self, scope: str):
+        return self._rag().client.get_or_create_collection("knowledge_notes" if scope == "notes" else "knowledge_library")
+
     def _ensure_dirs(self):
-        rag = self._rag()
-        os.makedirs(rag.knowledge_path, exist_ok=True)
+        os.makedirs(self._rag().knowledge_path, exist_ok=True)
         os.makedirs(self._library_dir(), exist_ok=True)
         os.makedirs(self._notes_dir(), exist_ok=True)
 
@@ -441,11 +458,15 @@ class RagScopeApi(core.module.Module):
         requested = str(requested).replace("\\", "/").strip().lstrip("/")
         candidates = []
         if scope in ("both", "library"):
-            candidates.append(os.path.abspath(os.path.join(self._rag().knowledge_path, requested)))
-            candidates.append(os.path.abspath(os.path.join(self._library_dir(), requested)))
+            candidates.extend([
+                os.path.abspath(os.path.join(self._rag().knowledge_path, requested)),
+                os.path.abspath(os.path.join(self._library_dir(), requested)),
+            ])
         if scope in ("both", "notes"):
-            candidates.append(os.path.abspath(os.path.join(self._notes_dir(), requested)))
-            candidates.append(os.path.abspath(os.path.join(self._legacy_notes_dir(), requested)))
+            candidates.extend([
+                os.path.abspath(os.path.join(self._notes_dir(), requested)),
+                os.path.abspath(os.path.join(self._legacy_notes_dir(), requested)),
+            ])
         if not requested.lower().endswith(self.SUPPORTED_EXTS):
             candidates.extend([f"{candidate}.md" for candidate in list(candidates)])
         for candidate in candidates:
