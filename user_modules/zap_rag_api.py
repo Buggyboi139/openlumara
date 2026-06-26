@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 from typing import Any
+from urllib.parse import parse_qs
 
 import core
 import uvicorn
@@ -20,36 +21,36 @@ class ZapRagApi(core.module.Module):
     settings = {
         "host": {
             "description": "Bind host for the Cockpit RAG bridge. Use 0.0.0.0 for another machine on the same trusted network, and set api_key.",
-            "default": "127.0.0.1"
+            "default": "127.0.0.1",
         },
         "port": {
             "description": "Port for the Cockpit RAG bridge. Burp Cockpit points to http://<openlumara-host>:5000/rag/search.",
-            "default": 5000
+            "default": 5000,
         },
         "api_key": {
             "description": "Optional bearer token required from Burp Cockpit. Set this when binding beyond loopback.",
-            "default": ""
+            "default": "",
         },
         "require_api_key": {
             "description": "Require the api_key even when bound to localhost.",
-            "default": False
+            "default": False,
         },
         "allow_no_auth_remote": {
             "description": "Allow unauthenticated requests from non-loopback clients. Leave false unless isolated by other controls.",
-            "default": False
+            "default": False,
         },
         "default_results": {
             "description": "Default number of RAG results returned to Cockpit.",
-            "default": 6
+            "default": 6,
         },
         "max_results": {
             "description": "Maximum number of RAG results a client may request.",
-            "default": 25
+            "default": 25,
         },
         "api_extensions": {
             "description": "Optional comma-separated file extensions to expose through the API bridge. Leave empty for all RagPro-supported files.",
-            "default": ""
-        }
+            "default": "",
+        },
     }
     dependencies = ["fastapi", "uvicorn"]
 
@@ -69,6 +70,7 @@ class ZapRagApi(core.module.Module):
             port=self.port,
             log_level="error",
             access_log=False,
+            http="h11",
         )
         self.server = uvicorn.Server(config)
         self.log("zap_rag_api", f"Starting Cockpit RAG API on http://{self.host}:{self.port}")
@@ -264,6 +266,13 @@ class ZapRagApi(core.module.Module):
 
         if not raw:
             return query_params
+
+        content_type = request.headers.get("content-type", "").lower()
+        if "application/x-www-form-urlencoded" in content_type:
+            parsed = parse_qs(raw.decode("utf-8", errors="ignore"), keep_blank_values=True)
+            data = {key: values[-1] if values else "" for key, values in parsed.items()}
+            data.update(query_params)
+            return data
 
         try:
             data = await request.json()
