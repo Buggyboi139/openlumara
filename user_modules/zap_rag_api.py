@@ -1,32 +1,33 @@
 import asyncio
 import ipaddress
 from typing import Any
-from urllib.parse import parse_qs
 
 import core
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 
 class ZapRagApi(core.module.Module):
     """
-    Local HTTP bridge for ZAP Cockpit to query OpenLumara's RagPro module.
+    HTTP bridge for Burp Cockpit and older ZAP Cockpit clients to query
+    OpenLumara's RagPro module from localhost or another machine on the same
+    trusted network.
 
-    Exposes /rag/* and /api/rag/* endpoints for localhost tooling.
+    Exposes /rag/* and /api/rag/* endpoints for Cockpit tooling.
     """
 
     settings = {
         "host": {
-            "description": "Host for the ZAP RAG bridge. Keep this local unless you know exactly why you are exposing it.",
+            "description": "Bind host for the Cockpit RAG bridge. Use 0.0.0.0 for another machine on the same trusted network, and set api_key.",
             "default": "127.0.0.1"
         },
         "port": {
-            "description": "Port for the ZAP RAG bridge. ZAP Cockpit defaults to http://127.0.0.1:5000.",
+            "description": "Port for the Cockpit RAG bridge. Burp Cockpit points to http://<openlumara-host>:5000/rag/search.",
             "default": 5000
         },
         "api_key": {
-            "description": "Optional bearer token required from ZAP Cockpit. Leave empty for local-only no-auth mode.",
+            "description": "Optional bearer token required from Burp Cockpit. Set this when binding beyond loopback.",
             "default": ""
         },
         "require_api_key": {
@@ -38,12 +39,16 @@ class ZapRagApi(core.module.Module):
             "default": False
         },
         "default_results": {
-            "description": "Default number of RAG results returned to ZAP Cockpit.",
+            "description": "Default number of RAG results returned to Cockpit.",
             "default": 6
         },
         "max_results": {
             "description": "Maximum number of RAG results a client may request.",
             "default": 25
+        },
+        "api_extensions": {
+            "description": "Optional comma-separated file extensions to expose through the API bridge. Leave empty for all RagPro-supported files.",
+            "default": ""
         }
     }
     dependencies = ["fastapi", "uvicorn"]
@@ -66,11 +71,11 @@ class ZapRagApi(core.module.Module):
             access_log=False,
         )
         self.server = uvicorn.Server(config)
-        self.log("zap_rag_api", f"Starting ZAP RAG API on http://{self.host}:{self.port}")
+        self.log("zap_rag_api", f"Starting Cockpit RAG API on http://{self.host}:{self.port}")
         if self._remote_bind_without_auth():
             self.log(
                 "zap_rag_api",
-                "WARNING: bridge is bound to a non-loopback host without api_key. Remote no-auth requests will be blocked by default.",
+                "WARNING: bridge is bound beyond loopback without api_key. Remote no-auth requests will be blocked by default.",
             )
         await self.server.serve()
 
@@ -99,18 +104,38 @@ class ZapRagApi(core.module.Module):
                 "success": True,
                 "status": "ok",
                 "service": "zap_rag_api",
+                "aliases": ["burp_cockpit_rag_api", "openlumara_rag_bridge"],
                 "rag_pro_loaded": rag is not None,
                 "endpoint": f"http://{self.host}:{self.port}",
                 "auth_required": self._auth_required_for_request(request),
+                "knowledge_path": getattr(rag, "knowledge_path", "") if rag else "",
+                "supported_extensions": getattr(rag, "SUPPORTED_EXTS", ()) if rag else (),
+                "api_extensions": self._api_extensions(),
             }
+
+        @self.app.get("/rag/folders")
+        @self.app.get("/api/rag/folders")
+        async def folders(request: Request):
+            await self._authorize(request)
+            rag = self._rag_module()
+            if not hasattr(rag, "list_knowledge_folders_structured"):
+                return {"success": True, "folders": []}
+            return {"success": True, "folders": await rag.list_knowledge_folders_structured()}
 
         @self.app.get("/rag/files")
         @self.app.get("/api/rag/files")
         async def files(request: Request):
             await self._authorize(request)
             rag = self._rag_module()
+            folder = self._folder_arg(request=request)
+            extensions = self._api_extensions(request=request)
             if hasattr(rag, "list_knowledge_files_structured"):
-                return {"success": True, "files": await rag.list_knowledge_files_structured()}
+                return {
+                    "success": True,
+                    "folder": folder or "",
+                    "extensions": extensions or getattr(rag, "SUPPORTED_EXTS", ()),
+                    "files": await rag.list_knowledge_files_structured(folder_path=folder, extensions=extensions),
+                }
             return {"success": True, "files_text": await rag.list_knowledge_files()}
 
         @self.app.post("/rag/ingest")
@@ -118,15 +143,18 @@ class ZapRagApi(core.module.Module):
         async def ingest(request: Request):
             await self._authorize(request)
             rag = self._rag_module()
-            if hasattr(rag, "ingest_folder") and hasattr(rag, "knowledge_path"):
-                result = await rag.ingest_folder(rag.knowledge_path)
+            data = await self._json_body(request)
+            folder = self._folder_arg(data=data, request=request)
+            extensions = self._api_extensions(data=data, request=request)
+            if hasattr(rag, "ingest_folder"):
+                result = await rag.ingest_folder(folder_path=folder or rag.knowledge_path, extensions=extensions)
             else:
                 success = await rag._safe_ingest()
                 result = {"success": bool(success)}
 
             if not result.get("success", False):
                 raise HTTPException(status_code=503, detail=result)
-            return {"success": True, "ingest": result}
+            return {"success": True, "folder": folder or "", "ingest": result}
 
         @self.app.post("/rag/search")
         @self.app.post("/api/rag/search")
@@ -157,10 +185,11 @@ class ZapRagApi(core.module.Module):
                 }
 
             if hasattr(rag, "search_structured"):
-                return await rag.search_structured(query, context=context, n_results=n_results)
+                result = await rag.search_structured(query, context=context, n_results=n_results)
+                return self._rag_search_response(request, data, result)
 
             text_result = await rag.search(query)
-            return {
+            result = {
                 "success": True,
                 "results": [
                     {
@@ -171,6 +200,7 @@ class ZapRagApi(core.module.Module):
                     }
                 ],
             }
+            return self._rag_search_response(request, data, result)
 
         @self.app.post("/rag/read")
         @self.app.post("/api/rag/read")
@@ -229,13 +259,30 @@ class ZapRagApi(core.module.Module):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     async def _json_body(self, request: Request):
+        raw = await request.body()
+        query_params = dict(request.query_params)
+
+        if not raw:
+            return query_params
+
         try:
             data = await request.json()
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=400, detail="JSON body must be an object")
-        return data
+            text = raw.decode("utf-8", errors="ignore").strip()
+            if text:
+                data = {"query": text}
+                data.update(query_params)
+                return data
+            return query_params
+
+        if isinstance(data, dict):
+            data.update(query_params)
+            return data
+
+        if isinstance(data, str) and data.strip():
+            data = {"query": data.strip()}
+            data.update(query_params)
+            return data
 
         return query_params
 
@@ -265,6 +312,84 @@ class ZapRagApi(core.module.Module):
         max_results = self._safe_int(self.config.get("max_results", default=25), 25, 1, 100)
         requested = data.get("n_results", data.get("nResults", default_results))
         return self._safe_int(requested, default_results, 1, max_results)
+
+    def _rag_search_response(self, request: Request, data: dict[str, Any], result: dict[str, Any]):
+        result = dict(result or {})
+        payload = {
+            "success": bool(result.get("success", False)),
+            "context": self._format_rag_context(result),
+            "bridge": "openlumara_rag_bridge",
+        }
+        for key, value in result.items():
+            if key not in payload:
+                payload[key] = value
+
+        requested_format = str(data.get("format") or data.get("response_format") or "").strip().lower()
+        accept = request.headers.get("accept", "").lower()
+        if requested_format in {"text", "plain", "text/plain"} or "text/plain" in accept:
+            return PlainTextResponse(payload["context"])
+        return payload
+
+    def _format_rag_context(self, result: dict[str, Any]):
+        if not result.get("success", False):
+            issue = str(result.get("issue") or "RAG search failed.").strip()
+            return f"OpenLumara RAG unavailable: {issue}"
+
+        results = result.get("results") if isinstance(result.get("results"), list) else []
+        if not results:
+            return "OpenLumara RAG returned no matching local knowledge."
+
+        lines = ["OpenLumara RAG results (read-only):"]
+        for index, item in enumerate(results, start=1):
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or item.get("path") or "unknown").strip()
+            score = item.get("score")
+            tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+            text = str(item.get("text") or item.get("chunk") or "").strip()
+            header = f"{index}. Source: {source}"
+            if score is not None:
+                try:
+                    header += f" | score {float(score):.3f}"
+                except Exception:
+                    pass
+            if tags:
+                header += " | tags " + ", ".join(str(tag) for tag in tags if str(tag).strip())
+            lines.append(header)
+            if text:
+                lines.append(text)
+            lines.append("---")
+        return "\n".join(lines).strip()
+
+    def _folder_arg(self, data: dict[str, Any] | None = None, request: Request | None = None):
+        value = None
+        if data:
+            value = data.get("folder") or data.get("path") or data.get("directory")
+        if not value and request is not None:
+            value = request.query_params.get("folder") or request.query_params.get("path") or request.query_params.get("directory")
+        return str(value).strip().lstrip("/") if value else None
+
+    def _api_extensions(self, data: dict[str, Any] | None = None, request: Request | None = None):
+        configured = str(self.config.get("api_extensions", default="") or "")
+        requested = ""
+        if data:
+            requested = str(data.get("extensions") or data.get("ext") or "")
+        if not requested and request is not None:
+            requested = str(request.query_params.get("extensions") or request.query_params.get("ext") or "")
+
+        raw = requested or configured
+        if not raw:
+            return None
+
+        extensions = []
+        for value in raw.replace(",", " ").split():
+            value = value.strip().lower()
+            if not value:
+                continue
+            if not value.startswith("."):
+                value = f".{value}"
+            extensions.append(value)
+        return tuple(dict.fromkeys(extensions)) or None
 
     def _auth_required_for_request(self, request: Request):
         api_key = str(self.config.get("api_key", default="") or "")

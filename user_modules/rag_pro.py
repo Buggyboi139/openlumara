@@ -22,7 +22,7 @@ class RagPro(core.module.Module):
 
     settings = {
         "knowledge_folder": {
-            "description": "The folder within /data to store yer documents",
+            "description": "The folder within /data to store documents. Subfolders are indexed recursively.",
             "default": "knowledge",
         },
         "embedding_model": {
@@ -102,10 +102,10 @@ class RagPro(core.module.Module):
             self.log("rag_pro", f"RAG ingestion failed: {e}")
             return False
 
-    async def ingest_folder(self, folder_path=None):
-        folder_path = os.path.abspath(folder_path or self.knowledge_path)
-        if not self._is_inside_knowledge(folder_path, allow_root=True):
-            return self._ingest_result(False, errors=[f"Refusing to ingest outside knowledge folder: {folder_path}"])
+    async def ingest_folder(self, folder_path=None, extensions=None):
+        folder_path = self._resolve_folder_path(folder_path)
+        if not folder_path:
+            return self._ingest_result(False, errors=["Refusing to ingest outside the knowledge folder."])
         if not os.path.isdir(folder_path):
             return self._ingest_result(False, errors=[f"Knowledge folder does not exist: {folder_path}"])
 
@@ -144,12 +144,15 @@ class RagPro(core.module.Module):
             skipped_files = []
             errors = []
 
-            for root, _, files in os.walk(folder_path):
-                for file_name in files:
-                    if not self._supported_file(file_name):
+            for root, dirs, files in os.walk(folder_path):
+                dirs.sort()
+                for file_name in sorted(files):
+                    if not self._supported_file(file_name, extensions=extensions):
                         continue
 
                     path = os.path.abspath(os.path.join(root, file_name))
+                    if not self._is_inside_knowledge(path):
+                        continue
                     source = self._source_for_path(path)
 
                     try:
@@ -176,6 +179,7 @@ class RagPro(core.module.Module):
                             {
                                 "source": source,
                                 "full_path": path,
+                                "extension": os.path.splitext(path)[1].lower(),
                                 "mtime": stat.st_mtime,
                                 "size": stat.st_size,
                             }
@@ -207,27 +211,49 @@ class RagPro(core.module.Module):
                 deleted_stale_sources=deleted_stale,
             )
 
-    async def list_knowledge_files_structured(self):
+    async def list_knowledge_files_structured(self, folder_path=None, extensions=None):
+        target_folder = self._resolve_folder_path(folder_path)
+
         def _get_files():
             files = []
-            if not os.path.exists(self.knowledge_path):
+            if not target_folder or not os.path.exists(target_folder):
                 return files
-            for root, _, names in os.walk(self.knowledge_path):
-                for name in names:
+            for root, dirs, names in os.walk(target_folder):
+                dirs.sort()
+                for name in sorted(names):
+                    if not self._supported_file(name, extensions=extensions):
+                        continue
                     path = os.path.abspath(os.path.join(root, name))
-                    if not os.path.isfile(path):
+                    if not os.path.isfile(path) or not self._is_inside_knowledge(path):
                         continue
                     stat = os.stat(path)
                     files.append({
                         "name": name,
                         "path": self._source_for_path(path),
+                        "folder": self._folder_for_path(path),
                         "size": stat.st_size,
                         "mtime": stat.st_mtime,
+                        "extension": os.path.splitext(name)[1].lower(),
                     })
             files.sort(key=lambda item: item["path"].lower())
             return files
 
         return await asyncio.to_thread(_get_files)
+
+    async def list_knowledge_folders_structured(self):
+        def _get_folders():
+            folders = []
+            if not os.path.exists(self.knowledge_path):
+                return folders
+            for root, dirs, _ in os.walk(self.knowledge_path):
+                dirs.sort()
+                for name in dirs:
+                    path = os.path.abspath(os.path.join(root, name))
+                    if self._is_inside_knowledge(path):
+                        folders.append(self._source_for_path(path))
+            return sorted(folders, key=str.lower)
+
+        return await asyncio.to_thread(_get_folders)
 
     async def list_knowledge_files(self):
         try:
@@ -287,7 +313,8 @@ class RagPro(core.module.Module):
             distance = distances[index] if index < len(distances) else None
             item = {
                 "source": meta.get("source", ""),
-                "path": meta.get("full_path", ""),
+                "path": meta.get("source", ""),
+                "folder": self._folder_for_source(meta.get("source", "")),
                 "text": doc,
                 "chunk": doc,
                 "tags": self._tags_for_result(meta, doc),
@@ -378,6 +405,18 @@ class RagPro(core.module.Module):
                 result["issue"] = "Note was saved, but automatic ingest failed."
         return result
 
+    def _resolve_folder_path(self, folder_path=None):
+        if folder_path in (None, "", "."):
+            return self.knowledge_path
+        requested = str(folder_path).replace("\\", "/").strip().lstrip("/")
+        if os.path.isabs(str(folder_path)):
+            candidate = os.path.abspath(str(folder_path))
+        else:
+            candidate = os.path.abspath(os.path.join(self.knowledge_path, requested))
+        if self._is_inside_knowledge(candidate, allow_root=True):
+            return candidate
+        return None
+
     def _resolve_knowledge_path(self, file_name: str):
         if not file_name:
             return None, ""
@@ -460,8 +499,25 @@ class RagPro(core.module.Module):
         cleaned = cleaned[:80].strip("._-")
         return cleaned or "zap_cockpit_note"
 
-    def _supported_file(self, file_name: str):
-        return file_name.lower().endswith(self.SUPPORTED_EXTS)
+    def _supported_file(self, file_name: str, extensions=None):
+        allowed_exts = self._normalize_extensions(extensions) or self.SUPPORTED_EXTS
+        return str(file_name).lower().endswith(allowed_exts)
+
+    def _normalize_extensions(self, extensions):
+        if not extensions:
+            return None
+        if isinstance(extensions, str):
+            raw_exts = [part.strip() for part in re.split(r"[, ]+", extensions) if part.strip()]
+        else:
+            raw_exts = [str(part).strip() for part in extensions if str(part).strip()]
+        normalized = []
+        for ext in raw_exts:
+            ext = ext.lower()
+            if not ext.startswith("."):
+                ext = f".{ext}"
+            if ext in self.SUPPORTED_EXTS:
+                normalized.append(ext)
+        return tuple(dict.fromkeys(normalized))
 
     def _read_file(self, path: str):
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -470,11 +526,22 @@ class RagPro(core.module.Module):
     def _source_for_path(self, path: str):
         return os.path.relpath(os.path.abspath(path), self.knowledge_path).replace(os.sep, "/")
 
+    def _folder_for_path(self, path: str):
+        folder = os.path.dirname(self._source_for_path(path)).replace(os.sep, "/")
+        return "" if folder == "." else folder
+
+    def _folder_for_source(self, source: str):
+        folder = os.path.dirname(str(source)).replace(os.sep, "/")
+        return "" if folder == "." else folder
+
     def _is_inside_knowledge(self, path: str, allow_root=False):
         path_abs = os.path.abspath(path)
         if allow_root and path_abs == self.knowledge_path:
             return True
-        return path_abs.startswith(self.knowledge_path + os.sep)
+        try:
+            return os.path.commonpath([self.knowledge_path, path_abs]) == self.knowledge_path and path_abs != self.knowledge_path
+        except ValueError:
+            return False
 
     def _ingest_result(self, success, indexed_files=0, indexed_chunks=0, skipped_files=None, errors=None, deleted_stale_sources=0):
         return {
